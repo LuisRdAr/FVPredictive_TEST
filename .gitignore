@@ -1,0 +1,9 @@
+**/Datos/
+**/Documentacion/
+**/Modelos/*
+!**/Modelos/irradiancias_esperadas/*.model
+
+<<<<<<< HEAD
+
+=======
+>>>>>>> 88534d53beef2390acc7bdbbef3461f8e2f4498e
