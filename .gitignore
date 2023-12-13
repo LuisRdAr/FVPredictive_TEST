@@ -1,7 +1,7 @@
-**/Datos/
-**/Documentacion/
-**/Modelos/*
-!**/Modelos/irradiancias_esperadas/*.model
+/**/Datos/
+/**/Documentacion/
+/**/Modelos/*
+!/**/Modelos/irradiancias_esperadas/**/*.model
 
 <<<<<<< HEAD
 

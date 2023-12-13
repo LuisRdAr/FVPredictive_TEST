@@ -9,4 +9,6 @@ xgboost==2.0.0
 tqdm==4.66.1
 requests==2.31.0
 pvlib==0.10.2
+hyperopt==0.2.7
+
 

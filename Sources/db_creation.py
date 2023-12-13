@@ -46,26 +46,26 @@ if __name__ == "__main__":
                 print("Error al conectarse a PostgreSQL:", e, sep = "\n")
                 sys.exit()
 
-        cur.execute(f'CREATE DATABASE {params["dbname"]};')
+            cur.execute(f'CREATE DATABASE {params["dbname"]};')
 
-        cur.close()
-        conn.close()
+            cur.close()
+            conn.close()
 
-        conn = psycopg2.connect(
-                database = params["dbname"],
-                user = params["user"],
-                password = params["password"],
-                host = params["host"],  
-                port = params["port"])
+            conn = psycopg2.connect(
+                    database = params["dbname"],
+                    user = params["user"],
+                    password = params["password"],
+                    host = params["host"],  
+                    port = params["port"])
 
-        conn.set_session(autocommit=True)
-        cur = conn.cursor()
-        open = True
-        print(f'Conexión exitosa a nueva database {params["dbname"]} de PostgreSQL')
-    else:
-        print("Error al conectarse a PostgreSQL:", e, sep = "\n")
-        open = False
-        sys.exit()
+            conn.set_session(autocommit=True)
+            cur = conn.cursor()
+            open = True
+            print(f'Conexión exitosa a nueva database {params["dbname"]} de PostgreSQL')
+        else:
+            print("Error al conectarse a PostgreSQL:", e, sep = "\n")
+            open = False
+            sys.exit()
 
     if open:
         ###################################
