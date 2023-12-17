@@ -1,6 +1,7 @@
 import pandas as pd
 import math
 import psycopg2
+import sqlalchemy
 from sqlalchemy import create_engine
 from tqdm import tqdm
 import json
@@ -18,6 +19,8 @@ if __name__ == "__main__":
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
+    else:
+        print(f"Parámetros de la planta {params['schema'].capitalize()} cargados correctamente")
     data_path = os.path.join(root_path, params["data_path"])
     schema_name = params["schema"]
 
@@ -43,11 +46,12 @@ if __name__ == "__main__":
         print(f"No se han encontrado nuevos registros para procesar en {schema_name}.contador_red_raw")
         sys.exit()
         
-    chunk_size = 50000
+    chunk_size = 2500000
     for i in tqdm(range(0, count, chunk_size), total = math.ceil(count/chunk_size)):
-        # Lectura de los datos de meteo sin procesar limitados por el chunk_size
+        # Lectura de los datos de ree sin procesar limitados por el chunk_size
         consulta_sql = f"SELECT * FROM {schema_name}.ree_raw WHERE procesado = false ORDER BY id LIMIT {chunk_size};"
         ree_df = pd.read_sql_query(consulta_sql, engine)
+        ree_df = ree_df.drop(columns = ["procesado", "datetime_procesado"])
 
         # Comprobación si el id del dispositivo está ya registrado y registro en caso de no ser así
         for id in ree_df["dispositivo_id"].unique():
@@ -62,6 +66,7 @@ if __name__ == "__main__":
                                                                             "ref", 
                                                                             "ubicacion", 
                                                                             "descripcion_dispositivo"]].drop_duplicates()
+                print(dispositivo)
                 cur.execute(f"""INSERT INTO {schema_name}.dispositivos
                             VALUES(%s, %s, %s, %s, %s, %s);""", 
                             tuple(attr for attr in dispositivo.values[0]))
@@ -77,27 +82,45 @@ if __name__ == "__main__":
                             "ref", 
                             "descripcion_dispositivo", 
                             "ubicacion"])
+        
+        # Volcado de datos en la tabla ree
+        try:
+            dtypes_ree = {
+                'id': sqlalchemy.types.INTEGER(),
+                'dispositivo_id': sqlalchemy.types.SMALLINT(),
+                'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
+                'med_id': sqlalchemy.types.INTEGER(),
+                'status': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'alarma': sqlalchemy.types.SMALLINT(),
+                'motivo': sqlalchemy.types.SMALLINT(),
+                'consigna_pot_act_ree': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'consigna_pot_act_planta': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'consigna_fdp_ree': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'consigna_fdp_planta': sqlalchemy.types.Float(precision=3, asdecimal=True)}
+            keys_ree = list(dtypes_ree.keys())
+            ree_df = ree_df.drop(columns=[col for col in ree_df.columns if col not in keys_ree])
+            ree_df.to_sql('ree', engine, if_exists = 'append', index = False, schema = schema_name, dtype = dtypes_ree)
 
-        # Iteración sobre el dataframe resultante, volcado en la tabla ree y actualización de la tabla raw
-        for row in tqdm(ree_df.itertuples(), position = 1, leave=False, total = ree_df.shape[0]):
+        except Exception as error:
+            print("Error en la escritura de datos en la tabla ree: \n\t{}".format(error))
+            sys.exit()
+
+        # Actualización de la tabla ree_raw para indicar que los registros han sido procesados y la fecha de procesado
+        # Se actualiza por trozos para evitar bloqueos de la tabla pasando un array de las ids a actualizar
+        ids = ree_df["id"].tolist()
+        chunk_size_update = 100000
+        id_chunks = [tuple(ids[i:i + chunk_size]) for i in range(0, len(ids), chunk_size_update)]
+        for id_chunk in id_chunks:
             try:
-                cur.execute(f"""INSERT INTO {schema_name}.ree(
-                        id, dispositivo_id, datetime_utc, med_id, status, alarma, motivo,
-                        consigna_pot_act_ree, consigna_pot_act_planta, consigna_fdp_ree, consigna_fdp_planta)
-                    VALUES 
-                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
-                    (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]))
                 cur.execute(f"""UPDATE {schema_name}.ree_raw
-                        SET procesado = true,
-                            datetime_procesado = NOW()
-                        WHERE id = %s""",
-                        (row[1],))
+                            SET procesado = true,
+                                datetime_procesado = NOW()
+                            WHERE id IN %s""",
+                            (id_chunk,))
                 conn.commit()
             except psycopg2.Error as e:
                 print("Error:", e)
-                print("\tID:", row[1])
                 conn.rollback()
-        
         del(ree_df)
     cur.close()
     conn.close()

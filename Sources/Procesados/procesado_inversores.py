@@ -1,6 +1,7 @@
 import pandas as pd
 import math
 import psycopg2
+import sqlalchemy
 from sqlalchemy import create_engine
 from tqdm import tqdm
 import json
@@ -18,6 +19,8 @@ if __name__ == "__main__":
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
+    else:
+        print(f"Parámetros de la planta {params['schema'].capitalize()} cargados correctamente")
     data_path = os.path.join(root_path, params["data_path"])
     schema_name = params["schema"]
 
@@ -32,8 +35,9 @@ if __name__ == "__main__":
             host = params['host'],  
             port = params['port'])
         cur = conn.cursor()
-    except psycopg2.Error as e:
-        print("Error al conectarse a PostgreSQL:", e)
+        print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
+    except Exception as error:
+        print("Error en la apertura de base de datos: \n\t{}".format(error))
         sys.exit()
 
     # Lectura del número de registros a procesar para proceder por trozos
@@ -43,13 +47,12 @@ if __name__ == "__main__":
         print(f"No se han encontrado nuevos registros para procesar en {schema_name}.inversores_raw")
         sys.exit()
 
-    chunk_size = 50000
+    chunk_size = 2500000
     for i in tqdm(range(0, count, chunk_size), total = math.ceil(count/chunk_size)):
         # Lectura de los datos de meteo sin procesar limitados por el chunk_size
         consulta_sql = f"SELECT * FROM {schema_name}.inversores_raw WHERE procesado = false ORDER BY id LIMIT {chunk_size};"
         inv_df = pd.read_sql_query(consulta_sql, engine)
-        if inv_df.empty:
-            continue
+        inv_df = inv_df.drop(columns = ["procesado", "datetime_procesado"])
             
         # Comprobación si el id del dispositivo está ya registrado y registro en caso de no ser así
         for id in inv_df["dispositivo_id"].unique():
@@ -64,21 +67,22 @@ if __name__ == "__main__":
                                                                             "ref", 
                                                                             "ubicacion", 
                                                                             "descripcion_dispositivo"]].drop_duplicates()
+                print(dispositivo)
                 cur.execute(f"""INSERT INTO {schema_name}.dispositivos
                             VALUES(%s, %s, %s, %s, %s, %s);""", 
                             tuple(attr for attr in dispositivo.values[0]))
             conn.commit()
         
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
-        inv_df = inv_df.drop(columns = ["parque_id",
+        inv_df.drop(columns = ["parque_id",
                             "descripcion_parque", 
                             "localizacion_parque",
                             "potencia_max", 
-                            "num_paneles"])
-        inv_df = inv_df.drop(columns = ["nombre_dispositivo", 
+                            "num_paneles"], inplace = True)
+        inv_df.drop(columns = ["nombre_dispositivo", 
                             "ref", 
                             "descripcion_dispositivo", 
-                            "ubicacion"])
+                            "ubicacion"], inplace = True)
         
         # Separacion del DataFrame inversores e inversores_detalle
         column_list = ["id"]+inv_df.columns[inv_df.columns.str.contains("amp_dc_in")].to_list()
@@ -91,37 +95,66 @@ if __name__ == "__main__":
         amp_df["entrada_id"] = amp_df["entrada_id"].apply(lambda x: x[9:])
         amp_df = amp_df.reset_index(drop = True)
 
-        # Iteración sobre el dataframe resultante, volcado en las tablas inversores e 
-        # inversores_detalle y actualización de la tabla raw
-        for row in tqdm(inv_df.itertuples(), position = 1, leave = False, total = inv_df.shape[0]):
+        # Escritura de los datos en la base de datos
+        try:
+            dtypes_inv = {
+                'id': sqlalchemy.types.INTEGER(),
+                'dispositivo_id': sqlalchemy.types.SMALLINT(),
+                'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
+                'med_id': sqlalchemy.types.INTEGER(),
+                'status': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'alarma': sqlalchemy.types.SMALLINT(),
+                'estado': sqlalchemy.types.SMALLINT(),
+                'potencia_act': sqlalchemy.types.SMALLINT(),
+                'potencia_rea': sqlalchemy.types.SMALLINT(),
+                'cos_phi': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'vol_12': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'vol_13': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'vol_23': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'amp_1': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'amp_2': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'amp_3': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'frec': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'lim_act': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'lim_rea': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'vol_dc_bus': sqlalchemy.types.SMALLINT(),
+                'aisl_dc': sqlalchemy.types.INTEGER(),
+                'energia_dia': sqlalchemy.types.INTEGER()}
+            keys_inv = list(dtypes_inv.keys())
+            inv_df = inv_df.drop(columns=[col for col in inv_df.columns if col not in keys_inv])
+            inv_df.to_sql('inversores', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes_inv, chunksize = 100000)
+        except Exception as error:
+            print("Error en la escritura de datos en la tabla inversores: \n\t{}".format(error))
+            sys.exit()
+        
+        try:
+            dtypes_amp = {
+                'id': sqlalchemy.types.INTEGER(),
+                'entrada_id': sqlalchemy.types.SMALLINT(),
+                'amp_dc': sqlalchemy.types.Float(precision=3, asdecimal=True)}
+            keys_amp = list(dtypes_amp.keys())
+            amp_df = amp_df.drop(columns=[col for col in amp_df.columns if col not in keys_amp])
+            amp_df.to_sql('inversores_detalle', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes_amp, chunksize = 100000)
+        except Exception as error:
+            print("Error en la escritura de datos en la tabla inversores_detalle: \n\t{}".format(error))
+            sys.exit()
+
+        # Actualización de la tabla inversores_raw para indicar que los registros han sido procesados y la fecha de procesado
+        # Se actualiza por trozos para evitar bloqueos de la tabla pasando un array de las ids a actualizar
+        ids = inv_df["id"].tolist()
+        chunk_size_update = 100000
+        id_chunks = [tuple(ids[i:i + chunk_size]) for i in range(0, len(ids), chunk_size_update)]
+        for id_chunk in id_chunks:
             try:
-                cur.execute(f"""INSERT INTO {schema_name}.inversores(
-                            id, dispositivo_id, datetime_utc, status, alarma, estado, 
-                            potencia_act, potencia_rea, cos_phi, vol_12, vol_13, vol_23, amp_1, 
-                            amp_2, amp_3, frec, lim_act, lim_rea, vol_dc_bus, aisl_dc, energia_dia)
-                        VALUES 
-                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s);""",
-                        (row[1], row[2], row[3], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
-                        row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21], row[22]))
-                amp_id_df = amp_df[amp_df["id"] == row[1]]
-                for row_amp in amp_id_df.itertuples():
-                    cur.execute(f"""INSERT INTO {schema_name}.inversores_detalle(
-                            id, entrada_id, amp_dc)
-                        VALUES 
-                            (%s, %s, %s);""",
-                        (row_amp[1], row_amp[2], row_amp[3]))
                 cur.execute(f"""UPDATE {schema_name}.inversores_raw
                             SET procesado = true,
                                 datetime_procesado = NOW()
-                            WHERE id = %s""",
-                            (row[1],))
+                            WHERE id IN %s""",
+                            (id_chunk,))
                 conn.commit()
             except psycopg2.Error as e:
                 print("Error:", e)
-                print("\tID:", row[1])
                 conn.rollback()
-
         del(inv_df, amp_df)
     cur.close()
     conn.close()

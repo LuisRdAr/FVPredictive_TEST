@@ -1,10 +1,10 @@
 import pandas as pd
-import psycopg2
+import sqlalchemy
+from sqlalchemy import create_engine
 import json
 import sys
 import os
 import shutil
-from tqdm import tqdm
 
 
 def procesar_directorio(initial_path, cadena):
@@ -20,15 +20,23 @@ def procesar_directorio(initial_path, cadena):
             for internal_filename in os.listdir(complete_path):
                 if internal_filename.endswith(".csv"):
                     csv_path = os.path.join(complete_path, internal_filename)
-                    temp_df = pd.read_csv(csv_path, delimiter = ";")
+                    try:
+                        temp_df = pd.read_csv(csv_path, delimiter = ";")
+                        if temp_df.shape[1] == 1:
+                            temp_df = pd.read_csv(csv_path, delimiter = ",")
+                    except pd.errors.ParserError:
+                        temp_df = pd.read_csv(csv_path, delimiter = ",")
                     df = pd.concat([df, temp_df])
-            if not os.path.exists(complete_path.replace("Nuevos", "Procesados")):
-                os.makedirs(complete_path.replace("Nuevos", "Procesados"))
-            shutil.move(complete_path, complete_path.replace("Nuevos", "Procesados"))   
+                    if not os.path.exists(complete_path.replace("Nuevos", "Procesados")):
+                        os.makedirs(complete_path.replace("Nuevos", "Procesados"))
+                    shutil.move(csv_path, csv_path.replace("Nuevos", "Procesados"))   
         elif (os.path.isfile(complete_path)) and (cadena in filename):
             csv_path = os.path.join(initial_path, filename)
-            temp_df = pd.read_csv(csv_path, delimiter = ";")
-            if temp_df.shape[1] == 1:
+            try:
+                temp_df = pd.read_csv(csv_path, delimiter = ";")
+                if temp_df.shape[1] == 1:
+                    temp_df = pd.read_csv(csv_path, delimiter = ",")
+            except pd.errors.ParserError:
                 temp_df = pd.read_csv(csv_path, delimiter = ",")
             df = pd.concat([df, temp_df])
             if not os.path.exists(initial_path.replace("Nuevos", "Procesados")):
@@ -53,6 +61,8 @@ if __name__ == "__main__":
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
+    else:
+        print(f"Parámetros de la planta {params['schema'].capitalize()} cargados correctamente")
     data_path = os.path.join(root_path, params["data_path"])
     schema_name = params["schema"]
 
@@ -61,14 +71,7 @@ if __name__ == "__main__":
     if df.empty:
         print(f"No se han encontrado nuevos ficheros para procesar en {data_path}")
         sys.exit()
-
-    # Parseo de fechas y ordenación del dataframe
-    for column in df.columns:
-        if ('date' in column.lower()):
-            df[column] = pd.to_datetime(df[column], utc=True)
-            df = df.rename(columns = {column: "datetime", "device_id": "dispositivo_id"})
-    df = df.sort_values(by = ["datetime", "dispositivo_id"])\
-            .reset_index(drop = True)
+    print(f"Se han encontrado {df.shape[0]} nuevos registros para procesar")
 
     # Procesado de columnas: conversión de tipos
     columns = []
@@ -85,78 +88,116 @@ if __name__ == "__main__":
             columns.append(column.strip().replace(" ", "_").lower())
     df.columns = columns
 
+    # Parseo de fechas y ordenación del dataframe
+    for column in df.columns:
+        if ('date' in column.lower()):
+            df[column] = pd.to_datetime(df[column], utc=True)
+            df = df.rename(columns = {column: "datetime_utc", "device_id": "dispositivo_id"})
+
+    num_na_pot_act = df[df["pot_act"].isna()].shape[0]
     df = df.dropna(subset = ["pot_act"])
+    num_duplicates = df[df.duplicated(subset = ["datetime_utc", "dispositivo_id"])].shape[0]
+    df = df.drop_duplicates(subset = ["datetime_utc", "dispositivo_id"], keep = "last").reset_index(drop = True)
 
     # Conexión a la base de datos y carga de datos
     try:
-        conn = psycopg2.connect(
-            database = params['dbname'],
-            user = params['user'],
-            password = params['password'],
-            host = params['host'],  
-            port = params['port'])
-        cur = conn.cursor()
-        print("Conexión exitosa a PostgreSQL")
-    except (Exception, psycopg2.Error) as error:
+        password = params['password'].replace('@', '%40')
+        engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
+        print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
+    except Exception as error:
         print("Error en la apertura de base de datos: \n\t{}".format(error))
         sys.exit()
 
-    for row in tqdm(df.itertuples(), total = df.shape[0]):
-        try:
-            cur.execute(f"""INSERT INTO {schema_name}.inversores_raw(
-                    parque_id, descripcion_parque, localizacion_parque, potencia_max, 
-                    num_paneles, dispositivo_id, nombre_dispositivo, ref, ubicacion,
-                    descripcion_dispositivo, datetime_utc, med_id, status, alarma, estado, 
-                    potencia_act, potencia_rea, cos_phi, vol_12, vol_13, vol_23, amp_1, 
-                    amp_2, amp_3, frec, lim_act, lim_rea, vol_dc_bus, amp_dc_in1, amp_dc_in2,
-                    amp_dc_in3, amp_dc_in4, amp_dc_in5, amp_dc_in6, amp_dc_in7, amp_dc_in8, 
-                    amp_dc_in9, amp_dc_in10, amp_dc_in11, amp_dc_in12, amp_dc_in13, amp_dc_in14,
-                    amp_dc_in15, amp_dc_in16, amp_dc_in17, amp_dc_in18, amp_dc_in19, amp_dc_in20, 
-                    amp_dc_in21, amp_dc_in22, amp_dc_in23, amp_dc_in24, aisl_dc, energia_dia)
-                VALUES 
-                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
-                (row.parque_id, row.descripcion_parque, row.localizacion_parque, row.potencia_max, 
-                row.num_paneles, row.dispositivo_id, row.nombre_dispositivo, row.ref, row.ubicacion,
-                row.descripcion_dispositivo, row.datetime, row.med_id, row.status, row.alarma, row.estado,
-                row.pot_act, row.pot_reac, row.cos_phi, row.volt_12, row.volt_13, row.volt_23, row.amp_1,
-                row.amp_2, row.amp_3, row.frec, row.lim_act, row.lim_react, row.volt_dc_bus, row.amp_dc_in1, 
-                row.amp_dc_in2, row.amp_dc_in3, row.amp_dc_in4, row.amp_dc_in5, row.amp_dc_in6, row.amp_dc_in7,
-                row.amp_dc_in8, row.amp_dc_in9, row.amp_dc_in10, row.amp_dc_in11, row.amp_dc_in12, row.amp_dc_in13,
-                row.amp_dc_in14, row.amp_dc_in15, row.amp_dc_in16, row.amp_dc_in17, row.amp_dc_in18, row.amp_dc_in19,
-                row.amp_dc_in20, row.amp_dc_in21, row.amp_dc_in22, row.amp_dc_in23, row.amp_dc_in24, row.aisl_dc,
-                row.energia_dia))
-            conn.commit()
-        except AttributeError:
-            # En caso de que alguna de las columnas no exista porque el source no las incluya, se inserta el registro sin ella
-            cur.execute(f"""INSERT INTO {schema_name}.inversores_raw(
-                    dispositivo_id, datetime_utc, med_id, status, alarma, estado, 
-                    potencia_act, potencia_rea, cos_phi, vol_12, vol_13, vol_23, amp_1, 
-                    amp_2, amp_3, frec, lim_act, lim_rea, vol_dc_bus, amp_dc_in1, amp_dc_in2,
-                    amp_dc_in3, amp_dc_in4, amp_dc_in5, amp_dc_in6, amp_dc_in7, amp_dc_in8, 
-                    amp_dc_in9, amp_dc_in10, amp_dc_in11, amp_dc_in12, amp_dc_in13, amp_dc_in14,
-                    amp_dc_in15, amp_dc_in16, amp_dc_in17, amp_dc_in18, amp_dc_in19, amp_dc_in20, 
-                    amp_dc_in21, amp_dc_in22, amp_dc_in23, amp_dc_in24, aisl_dc, energia_dia)
-                VALUES 
-                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
-                (row.dispositivo_id, row.datetime, row.med_id, row.status, row.alarma, row.estado,
-                row.pot_act, row.pot_reac, row.cos_phi, row.volt_12, row.volt_13, row.volt_23, row.amp_1,
-                row.amp_2, row.amp_3, row.frec, row.lim_act, row.lim_react, row.volt_dc_bus, row.amp_dc_in1, 
-                row.amp_dc_in2, row.amp_dc_in3, row.amp_dc_in4, row.amp_dc_in5, row.amp_dc_in6, row.amp_dc_in7,
-                row.amp_dc_in8, row.amp_dc_in9, row.amp_dc_in10, row.amp_dc_in11, row.amp_dc_in12, row.amp_dc_in13,
-                row.amp_dc_in14, row.amp_dc_in15, row.amp_dc_in16, row.amp_dc_in17, row.amp_dc_in18, row.amp_dc_in19,
-                row.amp_dc_in20, row.amp_dc_in21, row.amp_dc_in22, row.amp_dc_in23, row.amp_dc_in24, row.aisl_dc,
-                row.energia_dia))
-            conn.commit()
-        except Exception as error:
-            print("Error: ", error)
-            print(row)
-            conn.rollback()
-    cur.close()
-    conn.close()
-    print("Conexión a PostgreSQL cerrada")
+    # Comprobación de la existencia de registros duplicados en la base de datos
+    check_query = f"SELECT datetime_utc, dispositivo_id FROM {schema_name}.inversores_raw"
+    check_df = pd.read_sql_query(check_query, engine)
+    check_df["datetime_utc"] = pd.to_datetime(check_df["datetime_utc"], utc=True)
+    merged_df = df.merge(check_df, how='left', indicator=True, left_on = ["datetime_utc", "dispositivo_id"], right_on = ["datetime_utc", "dispositivo_id"])
+    df = merged_df[merged_df["_merge"] == "left_only"]
+    df = df.drop(columns = "_merge")
+    print(f"Se han encontrado {num_na_pot_act} registros con potencia activa nula")
+    print(f"Se han encontrado {num_duplicates} registros duplicados")
+    print(f"Se han encontrado {merged_df.shape[0] - df.shape[0]} registros ya existentes en la base de datos")
+
+    # Ordenación del dataframe por fecha y dispositivo
+    df = df.sort_values(by = ["datetime_utc", "dispositivo_id"])\
+            .reset_index(drop = True)
     
+    if "parque_id" not in df.columns:
+        df["parque_id"] = 1
+
+    # Volcado del dataframe a la base de datos
+    try:
+        df = df.rename(columns={"descripcion": "descripcion_parque", 
+                            "localizacion": "localizacion_parque", 
+                            "nombre": "nombre_dispositivo", 
+                            "descripcion.1": "descripcion_dispositivo", 
+                            "pot_act": "potencia_act", 
+                            "pot_reac": "potencia_rea", 
+                            "volt_12": "vol_12",
+                            "volt_13": "vol_13",
+                            "volt_23": "vol_23",
+                            "lim_react": "lim_rea", 
+                            "volt_dc_bus": "vol_dc_bus"})
+        dtypes = {
+            'parque_id': sqlalchemy.types.SMALLINT(),
+            'descripcion_parque': sqlalchemy.types.VARCHAR(length=25),
+            'localizacion_parque': sqlalchemy.types.VARCHAR(length=25),
+            'potencia_max': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'num_paneles': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'dispositivo_id': sqlalchemy.types.SMALLINT(),
+            'nombre_dispositivo': sqlalchemy.types.VARCHAR(length=25),
+            'ref': sqlalchemy.types.VARCHAR(length=25),
+            'ubicacion': sqlalchemy.types.VARCHAR(length=25),
+            'descripcion_dispositivo': sqlalchemy.types.VARCHAR(length=25),
+            'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
+            'med_id': sqlalchemy.types.INTEGER(),
+            'status': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'alarma': sqlalchemy.types.SMALLINT(),
+            'estado': sqlalchemy.types.SMALLINT(),
+            'potencia_act': sqlalchemy.types.SMALLINT(),
+            'potencia_rea': sqlalchemy.types.SMALLINT(),
+            'cos_phi': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'vol_12': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'vol_13': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'vol_23': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_1': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_2': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_3': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'frec': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'lim_act': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'lim_rea': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'vol_dc_bus': sqlalchemy.types.SMALLINT(),
+            'amp_dc_in1': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in2': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in3': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in4': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in5': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in6': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in7': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in8': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in9': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in10': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in11': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in12': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in13': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in14': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in15': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in16': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in17': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in18': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in19': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in20': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in21': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in22': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in23': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'amp_dc_in24': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'aisl_dc': sqlalchemy.types.INTEGER(),
+            'energia_dia': sqlalchemy.types.INTEGER()}
+        keys = list(dtypes.keys())
+        df = df.drop(columns=[col for col in df.columns if col not in keys])
+        df.to_sql('inversores_raw', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes, chunksize = 100000)
+
+    except Exception as error:
+        print(f"Error en volcado del dataframe: \n\t{error}")
+        sys.exit()
