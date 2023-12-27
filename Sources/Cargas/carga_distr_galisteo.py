@@ -16,7 +16,7 @@ if __name__ == "__main__":
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
-    data_path = os.path.join(root_path, params["data_path"])
+    data_path = os.path.join(root_path, "Galisteo/Documentacion/Placas/Placas/Distribución Potencias por SCB - Galisteo.csv"
     schema_name = params["schema"]
 
     # Inicialización del dataframe y lectura del csv

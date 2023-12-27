@@ -24,8 +24,6 @@ from sklearn.metrics import mean_squared_error as mse, \
                             r2_score as r2
 
 
-
-
 class degree_scaler(BaseEstimator, TransformerMixin):
     def __init__(self):
         self.columns_to_scale_90 = None
@@ -98,7 +96,7 @@ def discriminador(x):
 
 if __name__ == "__main__":
     # Carga de los parámetros para conexión a la base de datos
-    root_path = "/home/luis/Desktop/venv_test/test_env/FVPREDICTIVE/Galisteo/"
+    root_path = os.getcwd( )
     params = None
     for filename in os.listdir(root_path):
         if "params.json" in filename:
@@ -116,7 +114,7 @@ if __name__ == "__main__":
 
     num_mod_string = 30
     sup_mod = 2
-    inv_id = 22
+    inv_id = 23
     # Carga de los datos de entrenamiento
     print(f"Entrenamiento para el inversor {inv_id - 20}")
     if schema_name == "galisteo":
@@ -355,12 +353,12 @@ if __name__ == "__main__":
     }
 
     trials = Trials()
-    use_cv = True
+    use_cv = False
     if use_cv:
         print("Optimización de hiperparámetros con cross-validation")
     else:
         print("Optimización de hiperparámetros sobre conjunto de validación")
-    best = fmin(fn=lambda space: objective(space, use_cv=use_cv), space=space, algo=tpe.suggest, max_evals=1000, trials=trials)
+    best = fmin(fn=lambda space: objective(space, use_cv=use_cv), space=space, algo=tpe.suggest, max_evals=1, trials=trials)
     print(f"Mejor combinación de hiperparámetros:\n{best}")
     
     # Entrenamiento del modelo con los mejores hiperparámetros

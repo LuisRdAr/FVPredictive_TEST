@@ -66,6 +66,8 @@ if __name__ == "__main__":
         sys.exit()
 
     chunk_size = 2500000
+    outliers_iqr = 0
+    outliers_off = 0
     for i in tqdm(range(0, count, chunk_size), total = math.ceil(count/chunk_size)):
         # Lectura de los datos de meteo sin procesar limitados por el chunk_size
         consulta_sql = f"""WITH daylight AS(
@@ -141,6 +143,7 @@ if __name__ == "__main__":
                         (rad_df["temp_amb"] >= -273.15) & (rad_df["temp_amb"] <= metrics[metrics["column"] == "temp_amb"]["upper_lim"].values[0]) &
                         (rad_df["temp_panel1"] >= -273.15) & (rad_df["temp_panel1"] <= metrics[metrics["column"] == "temp_panel1"]["upper_lim"].values[0]) &
                         (rad_df["temp_panel2"] >= -273.15) & (rad_df["temp_panel2"] <= metrics[metrics["column"] == "temp_panel2"]["upper_lim"].values[0])]
+        outliers_iqr += rad_df.shape[0] - clean_rad_df.shape[0]
 
         # Descarte de registros donde los instrumentos no funcionasen bien  <-- PENDIENTE DE REVISIÓN
         # Se descartan los registros donde el comportamiento medio de los sensores no supere un umbral
@@ -164,18 +167,22 @@ if __name__ == "__main__":
                         (agg_df["temp_amb"] > 0) &
                         (agg_df["temp_panel1"] > 0) &
                         (agg_df["temp_panel2"] > 0)][["dispositivo_id", "date"]]
+        num_rows = clean_rad_df.shape[0]
         clean_rad_df = pd.merge(agg_df[["dispositivo_id", "date"]], clean_rad_df, left_on=["dispositivo_id", "date"], right_on=["dispositivo_id", "date"], how="inner")
-
+        outliers_off += num_rows - clean_rad_df.shape[0]
         # Compleción de los registros relativos al viento y humedad (solo una estación registra los datos en Galisteo, 
         # y los anemómetros se encuentran separados de las estaciones en Bonete)
         if schema_name.lower() == "galisteo":
             # Se separan los registros de la estación que mide la humedad y viento y se descartan los registros fuera del rango natural
             hum_df = clean_rad_df[clean_rad_df["dispositivo_id"] == 42][["datetime_utc","hum_rel", "vel_viento", "dir_viento"]]
+            outliers_iqr += hum_df[(hum_df["vel_viento"] < 0) | (hum_df["vel_viento"] > 100) |
+                        (hum_df["dir_viento"] < 0) | (hum_df["dir_viento"] > 360) |
+                        (hum_df["hum_rel"] >0) | (hum_df["hum_rel"] > 100)].shape[0]
             hum_df = hum_df[(hum_df["vel_viento"] >= 0) & (hum_df["vel_viento"] <= 100) &
                             (hum_df["dir_viento"] >= 0) & (hum_df["dir_viento"] <= 360) &
                             (hum_df["hum_rel"] >= 0) & (hum_df["hum_rel"] <= 100)]
-            # Se asignan los valores de humedad y viento al resto de registros mediante un merge
-            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["hum_rel", "vel_viento", "dir_viento"]), hum_df, on="datetime_utc")
+            # Se asignan los valores de humedad y viento al resto de registros mediante un left merge debido a la GRAN cantidad de valores nulos en hum_rel
+            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["hum_rel", "vel_viento", "dir_viento"]), hum_df, on="datetime_utc", how = "left")
 
         elif schema_name.lower() == "bonete":  
             # Se separan los registros de la estación que mide la humedad y los registros de viento y se descartan los registros fuera del rango natural
@@ -188,15 +195,17 @@ if __name__ == "__main__":
             # Se calculan los valores medios de viento y dirección para cada instante 
             ane_agg_df = clean_ane_df[["datetime_utc", "vel_viento", "dir_viento"]].groupby("datetime_utc").mean().reset_index()
             # Se asignan los valores de humedad y viento al resto de registros mediante un merge
-            clean_rad_df = pd.merge(clean_rad_df.drop(columns=["hum_rel"]), hum_df, on="datetime_utc")
-            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["vel_viento", "dir_viento"]), ane_agg_df, on="datetime_utc")
+            num_rows = clean_rad_df.shape[0]
+            clean_rad_df = pd.merge(clean_rad_df.drop(columns=["hum_rel"]), hum_df, on="datetime_utc", how = "inner")
+            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["vel_viento", "dir_viento"]), ane_agg_df, on="datetime_utc", how = "inner")
+            outliers_iqr += num_rows - clean_meteo_df.shape[0]
 
         # Cálculo de la elevación y azimuth para los instantes dados
         solar_position = parque.get_solarposition(pd.date_range(start = clean_meteo_df["datetime_utc"].min(), 
                                                     end = clean_meteo_df["datetime_utc"].max(),
                                                     freq="30s", 
                                                     tz="utc"))[["elevation", "azimuth"]]
-        clean_meteo_df = pd.merge(clean_meteo_df, solar_position, left_on = "datetime_utc", right_index = True)
+        clean_meteo_df = pd.merge(clean_meteo_df, solar_position, left_on = "datetime_utc", right_index = True, how = "inner")
         clean_meteo_df["daylight"] = np.where((clean_meteo_df["datetime_utc"] >= clean_meteo_df["sunrise"]) & 
                                               (clean_meteo_df["datetime_utc"] < clean_meteo_df["sunset"]),
                                         True,
@@ -236,7 +245,7 @@ if __name__ == "__main__":
                 ratio.append(row.ratio_poa)
             else:
                 ratio.append(100)
-        clean_meteo_df["ratio_mean"] = ratio
+        clean_meteo_df["cloud_impact"] = ratio
 
         # # Filtrado de outliers siguiendo el criterio de las desviaciones estandar. Agrupación 
         # # de rangos normales por daylight y mes del año.
@@ -333,3 +342,6 @@ if __name__ == "__main__":
         del(meteo_df)
     cur.close()
     conn.close()
+    print("Número de registros descartados por IQR: ", outliers_iqr)
+    print("Número de registros descartados por outliers de sensores: ", outliers_off)
+    print("Número de registros cargados inicialmente: ", count)
