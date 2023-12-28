@@ -95,7 +95,8 @@ def discriminador(x, norm):
     return results
 
 def objective(space, train_set, test_set, use_cv = False):
-    model = XGBRegressor(objective='reg:squarederror', 
+    model = XGBRegressor(#device = 'cuda:0',
+                        objective='reg:squarederror', 
                         tree_method="hist", 
                         multi_strategy="multi_output_tree", 
                         n_jobs=-1, 
@@ -121,7 +122,7 @@ def objective(space, train_set, test_set, use_cv = False):
     return {'loss':loss, 'status': STATUS_OK}
 
 
-root_path = "/home/upo/Desktop/Test_FVPredictive/FVPredictive_TEST/Galisteo"
+root_path = os.getcwd()
 params = None
 for filename in os.listdir(root_path):
     if "params.json" in filename:
@@ -168,7 +169,37 @@ if schema_name == "galisteo":
             JOIN {schema_name}.ree AS ree
                 ON ree.datetime_utc = f.datetime_utc
             WHERE daylight = true
-            ORDER BY 3, 1, 2;"""
+            ORDER BY 4, 2, 3;"""
+elif schema_name == "bonete":   
+        main_query = f"""
+            WITH inv AS (
+                SELECT *
+                    FROM {schema_name}.inversores
+                    WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
+                        AND (EXTRACT(SECOND FROM datetime_utc) = 0)
+                        AND (alarma = 0)
+                        AND (estado = 6)),
+                met AS (
+                    SELECT datetime_utc, AVG(rad_poa) AS rad_poa, AVG(rad_hor) AS rad_hor, AVG(rad_celda1) AS rad_celda1,
+                            AVG(rad_celda2) AS rad_celda2, AVG(temp_amb) AS temp_amb, AVG(temp_panel1) AS temp_panel1,
+                            AVG(temp_panel2) AS temp_panel2, AVG(cloud_impact) AS cloud_impact, BOOL_OR(daylight) AS daylight
+                        FROM {schema_name}.meteo
+                        GROUP BY datetime_utc)
+            SELECT inv.id, inv.dispositivo_id, det.entrada_id, inv.datetime_utc, potencia_act, lim_act, num_strings, 
+                    rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, cloud_impact, 
+                    motivo, consigna_pot_act_ree, amp_dc
+                FROM inv
+                JOIN {schema_name}.inversores_detalle AS det
+                    ON inv.id = det.id
+                JOIN {schema_name}.distrib_inversores dist
+                    ON  dist.dispositivo_id = inv.dispositivo_id
+                        AND dist.entrada_id = det.entrada_id
+                JOIN met
+                    ON met.datetime_utc = inv.datetime_utc
+                JOIN {schema_name}.ree AS ree
+                    ON ree.datetime_utc = inv.datetime_utc
+                WHERE daylight = true
+                ORDER BY 4, 2, 3;"""
 else:
     print("Esquema no reconocido")
     sys.exit()
@@ -250,7 +281,7 @@ amp_dc_planta = main_df[["datetime_utc", "amp_dc"]].groupby(["datetime_utc"]).me
 main_df = main_df.merge(amp_dc_inv, on = ["dispositivo_id", "datetime_utc"])
 main_df = main_df.merge(amp_dc_planta, on = ["datetime_utc"])
 
-for inv_id in main_df["dispositivo_id"].unique():
+for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     # Separación de los datos de entrenamiento y validación
     print(f"Dispositivo {inv_id}")
     disp_df = main_df[main_df["dispositivo_id"] == inv_id]
@@ -310,25 +341,7 @@ for inv_id in main_df["dispositivo_id"].unique():
 
     optimizacion = True
     if optimizacion:
-        space ={
-            'max_depth': hp.quniform("x_max_depth", 3, 20, 1),
-            'n_estimators': hp.quniform('x_n_estimators', 100, 2000, 1),
-            'learning_rate': hp.uniform('x_learning_rate', 0.01, 0.2),
-            'gamma': hp.uniform ('x_gamma', 0, 1),
-            'min_child_weight' : hp.quniform('x_min_child', 1, 30, 1),
-            'subsample' : hp.uniform('x_subsample', 0.5, 1),
-            'reg_alpha' : hp.uniform('x_reg_alpha', 0, 20),
-            'reg_lambda' : hp.uniform('x_reg_lambda', 0, 10)
-        }
-
-        trials = Trials()
         use_cv = False
-        best_loss = np.inf
-        stall_counter = 0
-        STALL_LIMIT = 5
-        MAX_EVALS_PER_RUN = 50
-        total_evals = 0
-        run_counter = 0
         if use_cv:
             print("\tOptimización de hiperparámetros con cross-validation")
             train_set = (X_prep, y)
@@ -338,10 +351,58 @@ for inv_id in main_df["dispositivo_id"].unique():
             X_train, X_test, y_train, y_test = train_test_split(X_prep, y, test_size = 0.2)
             train_set = (X_train, y_train)
             test_set = (X_test, y_test)
-        # best = fmin(fn=lambda space: objective(space, train_set = train_set, test_set = test_set, use_cv=use_cv), space=space, algo=tpe.suggest, max_evals=10, trials=trials)
-        # print(f"\tMejor combinación de hiperparámetros:\n{best}")
 
-        while stall_counter < STALL_LIMIT:
+        trials = Trials()
+        best_loss = np.inf
+        stall_counter = 0
+        STALL_LIMIT = 2
+        MAX_EVALS_PER_RUN = 50
+        total_evals = 0
+        run_counter = 0
+        space ={
+            'max_depth': hp.quniform("x_max_depth", 3, 15, 2),
+            'n_estimators': hp.quniform('x_n_estimators', 100, 1500, 100),
+            'learning_rate': hp.quniform('x_learning_rate', 0.01, 0.2, 0.01),
+            'gamma': hp.quniform ('x_gamma', 0, 1, 0.1),
+            'min_child_weight' : hp.quniform('x_min_child', 1, 20, 3),
+            'subsample' : hp.quniform('x_subsample', 0.5, 1, 0.1),
+            'reg_alpha' : hp.quniform('x_reg_alpha', 0, 10, 0.5),
+            'reg_lambda' : hp.quniform('x_reg_lambda', 0, 10, 0.5)
+        }
+        while stall_counter < STALL_LIMIT and total_evals < 10000:
+            best = fmin(fn=lambda space: objective(space, train_set = train_set, test_set = test_set, use_cv=use_cv), 
+                        space=space, 
+                        algo=tpe.suggest, 
+                        max_evals=total_evals + MAX_EVALS_PER_RUN, 
+                        trials=trials)
+            
+            new_loss = trials.best_trial['result']['loss']
+            if new_loss < best_loss:
+                best_loss = new_loss
+                stall_counter = 0
+            else:
+                stall_counter += 1
+
+            total_evals += MAX_EVALS_PER_RUN
+            run_counter += 1
+            print(f"Run {run_counter}: Best loss so far: {best_loss}")
+
+        stall_counter = 0
+        STALL_LIMIT = 2
+        MAX_EVALS_PER_RUN = 50
+        initial_total_evals = total_evals
+        run_counter = 0
+        space ={
+            'max_depth': hp.quniform("x_max_depth", 3, 15, 1),
+            'n_estimators': hp.quniform('x_n_estimators', 100, 1500, 1),
+            'learning_rate': hp.quniform('x_learning_rate', 0.01, 0.2, 0.001),
+            'gamma': hp.quniform ('x_gamma', 0, 1, 0.01),
+            'min_child_weight' : hp.quniform('x_min_child', 1, 20, 1),
+            'subsample' : hp.quniform('x_subsample', 0.5, 1, 0.05),
+            'reg_alpha' : hp.quniform('x_reg_alpha', 0, 10, 0.01),
+            'reg_lambda' : hp.quniform('x_reg_lambda', 0, 10, 0.01)
+        }
+        while stall_counter < STALL_LIMIT and total_evals < initial_total_evals + 10000:
             best = fmin(fn=lambda space: objective(space, train_set = train_set, test_set = test_set, use_cv=use_cv), 
                         space=space, 
                         algo=tpe.suggest, 
