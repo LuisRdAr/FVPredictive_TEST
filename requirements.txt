@@ -10,5 +10,5 @@ tqdm==4.66.1
 requests==2.31.0
 pvlib==0.10.2
 hyperopt==0.2.7
-
+torch==2.1.2
 

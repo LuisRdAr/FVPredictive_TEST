@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sqlalchemy import create_engine
@@ -17,14 +18,13 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.ensemble import RandomForestRegressor
 # from sklearn.linear_model import LinearRegression
-# from sklearn.multioutput import MultiOutputRegressor
+from sklearn.multioutput import MultiOutputRegressor
 from xgboost import XGBRegressor
 from hyperopt import hp, fmin, tpe, STATUS_OK, Trials
 from functools import partial
 from sklearn.metrics import mean_squared_error as mse, \
                             mean_absolute_error as mae, \
                             r2_score as r2
-
 
 
 class degree_scaler(BaseEstimator, TransformerMixin):
@@ -97,9 +97,24 @@ def discriminador(x, norm):
     results = results.reset_index(drop=True)
     return results
 
-def objective(space, model_name, train_set, test_set, use_cv = False):
-    if model_name == "XGBRegressor":
-        model = XGBRegressor(#device = 'cuda:0',
+def objective(space, model_name, train_set, test_set, use_cv = False, device = "cpu"):
+    if model_name == "XGBRegressor" and device == "cuda":
+        model = MultiOutputRegressor(XGBRegressor(device = 'cuda:0',
+                        objective='reg:squarederror', 
+                        tree_method="hist_gpu", 
+                        n_jobs=-1, 
+                        n_estimators =int(space['n_estimators']), 
+                        max_depth = int(space['max_depth']), 
+                        learning_rate = space['learning_rate'],
+                        gamma = space['gamma'],
+                        min_child_weight = space['min_child_weight'],
+                        subsample = space['subsample'],
+                        reg_alpha = space['reg_alpha'],
+                        reg_lambda = space['reg_lambda'],
+                        eval_metric='rmse'
+                        ))
+    if model_name == "XGBRegressor" and device == "cpu":
+        model = XGBRegressor(device = 'cpu',
                         objective='reg:squarederror', 
                         tree_method="hist", 
                         multi_strategy="multi_output_tree", 
@@ -120,9 +135,7 @@ def objective(space, model_name, train_set, test_set, use_cv = False):
                                     max_depth = int(space['max_depth']), 
                                     max_features = space['max_features'], 
                                     min_samples_leaf = int(space['min_samples_leaf']), 
-                                    min_samples_split = int(space['min_samples_split']),
-                                    bootstrap = space['bootstrap'],
-                                    criterion = space['criterion'])
+                                    min_samples_split = int(space['min_samples_split']))
     else:
         print("Modelo no reconocido")
         sys.exit()
@@ -131,7 +144,7 @@ def objective(space, model_name, train_set, test_set, use_cv = False):
         scores = cross_val_score(model, train_set[0], train_set[1], cv=5, scoring='neg_mean_squared_error')
         loss = -np.mean(scores)
     else:
-        model.fit(X_train, y_train)
+        model.fit(train_set[0], train_set[1])
         y_pred = model.predict(test_set[0])
         loss = mse(test_set[1], y_pred)
 
@@ -323,7 +336,8 @@ main_df = main_df.merge(amp_dc_planta, on = ["datetime_utc"])
 for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     # Separación de los datos de entrenamiento y validación
     print(f"Dispositivo {inv_id}")
-    disp_df = main_df[main_df["dispositivo_id"] == inv_id]
+    disp_df = main_df[main_df["dispositivo_id"] == inv_id].copy()
+    disp_df.dropna()
     validation_df = disp_df[disp_df["datetime_utc"].dt.month == 9]
     train_df = disp_df[disp_df["datetime_utc"].dt.month != 9]
     print(f"\tRegistros de entrenamiento: {disp_df.shape[0]}")
@@ -376,7 +390,6 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
                                 remainder='passthrough')
     
     X_prep = preprocessor.fit_transform(X)
-    X_val_prep = preprocessor.transform(X_val)
 
     if optimizacion:
         # Split de los datos de entrenamiento para optimización de hiperparámetros en caso de no usar validación cruzada
@@ -390,6 +403,15 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
             train_set = (X_train, y_train)
             test_set = (X_test, y_test)
 
+        # Comprueba si CUDA está disponible
+        flag = False
+        if torch.cuda.is_available() and model_name == "XGBRegressor" and flag:
+            import cupy as cp
+            device = 'cuda'
+            train_set = (cp.asarray(element) for element in train_set)
+            test_set = (cp.asarray(element) for element in test_set)
+        else:
+            device = 'cpu'
         # Inicialización  y primera fase de la optimización de hiperparámetros con gamma = 1 y espacio de búsqueda general
         trials = Trials()
         best_loss = np.inf
@@ -415,7 +437,7 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
                 'n_estimators': hp.quniform("x_n_estimators", 100, 1500, 100),
                 'min_samples_split': hp.quniform ('x_min_samples_split', 2, 20, 2),
                 'min_samples_leaf': hp.quniform ('x_min_samples_leaf', 1, 19, 2),
-                'max_features': hp.choice('x_max_features', ['auto', 'sqrt', 'log2']),     
+                'max_features': hp.choice('x_max_features', [None, 'sqrt', 'log2']),     
             }
         while stall_counter < STALL_LIMIT and total_evals < 10000:
             best = fmin(fn=lambda space: objective(space, model_name = model_name, train_set = train_set, test_set = test_set, use_cv=use_cv), 
@@ -433,6 +455,9 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
 
             total_evals += MAX_EVALS_PER_RUN
             run_counter += 1
+
+            if total_evals % 1000 == 0:
+                gamma = max(0, gamma - 0.05)
             print(f"Run {run_counter}: Best loss so far: {best_loss}")
 
         # Segunda fase de la optimización de hiperparámetros con gamma = 0.25 y espacio de búsqueda fino
@@ -481,51 +506,62 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
         print(f"\tMejor combinación de hiperparámetros:\n{best}")
     
         # Entrenamiento del modelo con los mejores hiperparámetros
-        if model_name == "XGBRegressor":
-            model = Pipeline(steps=[('preprocessor', preprocessor),
-                                ('regressor', XGBRegressor(objective='reg:squarederror', 
-                                                        tree_method="hist", 
-                                                        multi_strategy="multi_output_tree", 
-                                                        n_jobs=-1, 
-                                                        gamma = best["x_gamma"],
-                                                        learning_rate = best["x_learning_rate"],
-                                                        max_depth = int(best["x_max_depth"]),
-                                                        min_child_weight = int(best["x_min_child"]),
-                                                        n_estimators = int(best["x_n_estimators"]),
-                                                        reg_alpha = best["x_reg_alpha"],
-                                                        reg_lambda = best["x_reg_lambda"],
-                                                        subsample = best["x_subsample"]))
-                                ])
+        if model_name == "XGBRegressor" and device == "cuda":
+            model = MultiOutputRegressor(XGBRegressor(device = 'cuda:0',
+                        objective='reg:squarederror', 
+                        tree_method="hist_gpu", 
+                        n_jobs=-1, 
+                        gamma = best["x_gamma"],
+                        learning_rate = best["x_learning_rate"],
+                        max_depth = int(best["x_max_depth"]),
+                        min_child_weight = int(best["x_min_child"]),
+                        n_estimators = int(best["x_n_estimators"]),
+                        reg_alpha = best["x_reg_alpha"],
+                        reg_lambda = best["x_reg_lambda"],
+                        subsample = best["x_subsample"]))
+        elif model_name == "XGBRegressor" and device == "cpu":
+            model = XGBRegressor(device = 'cpu',
+                        objective='reg:squarederror', 
+                        tree_method="hist", 
+                        multi_strategy="multi_output_tree", 
+                        n_jobs=-1, 
+                        gamma = best["x_gamma"],
+                        learning_rate = best["x_learning_rate"],
+                        max_depth = int(best["x_max_depth"]),
+                        min_child_weight = int(best["x_min_child"]),
+                        n_estimators = int(best["x_n_estimators"]),
+                        reg_alpha = best["x_reg_alpha"],
+                        reg_lambda = best["x_reg_lambda"],
+                        subsample = best["x_subsample"])
+            
         elif model_name == "RandomForestRegressor":
-            model = Pipeline(steps=[('preprocessor', preprocessor),
-                                ('regressor', RandomForestRegressor(n_jobs=-1, 
-                                                                    n_estimators = int(best["x_n_estimators"]), 
-                                                                    max_depth = int(best["x_max_depth"]), 
-                                                                    max_features = best["x_max_features"], 
-                                                                    min_samples_leaf = int(best["x_min_samples_leaf"]), 
-                                                                    min_samples_split = int(best["x_min_samples_split"])))
-                                ])
-        model.fit(X, y)
+            model = RandomForestRegressor(n_jobs=-1, 
+                                            n_estimators = int(best["x_n_estimators"]), 
+                                            max_depth = int(best["x_max_depth"]), 
+                                            max_features = best["x_max_features"], 
+                                            min_samples_leaf = int(best["x_min_samples_leaf"]), 
+                                            min_samples_split = int(best["x_min_samples_split"]))
+        model.fit(X_prep, y)
     else:
         if model_name == "XGBRegressor":
-            model = Pipeline(steps=[('preprocessor', preprocessor),
-                                ('regressor', XGBRegressor(objective='reg:squarederror', 
-                                                        tree_method="hist", 
-                                                        multi_strategy="multi_output_tree", 
-                                                        n_jobs=-1))
-                                ])
+            model = XGBRegressor(objective='reg:squarederror', 
+                                    tree_method="hist", 
+                                    multi_strategy="multi_output_tree", 
+                                    n_jobs=-1)
         elif model_name == "RandomForestRegressor":
-            model = Pipeline(steps=[('preprocessor', preprocessor),
-                                ('regressor', RandomForestRegressor(n_jobs=-1))
-                                ])
-        model.fit(X, y)
+            model = RandomForestRegressor(n_jobs=-1)
+        model.fit(X_prep, y)
 
+    pipeline_model = Pipeline([('preprocessor', preprocessor),
+                            ('regressor', model)])
+    
     # Evaluación del modelo sobre conjunto de validación
     consulta_sql = f"""SELECT num_strings
                     FROM {schema_name}.distrib_inversores
                     WHERE dispositivo_id = {inv_id};"""
     num_strings = pd.read_sql_query(consulta_sql, engine).values.reshape(1, -1)
-    y_pred_val = pd.DataFrame(model.predict(X_val)).rename(columns={i: "y_pred_"+str(i+1) for i in pd.DataFrame(model.predict(X_val)).columns})
+
+    y_pred_val = pd.DataFrame(pipeline_model.predict(X_val)).rename(columns={i: "y_pred_"+str(i+1) for i in pd.DataFrame(pipeline_model.predict(X_val)).columns})
     if normalizacion:
         y_pred_val = y_pred_val * num_strings
         y_val_reesc = y_val * num_strings
@@ -550,16 +586,16 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     print(f"\tMétricas de error:\n\t\tRMSE: {rmse_score}\n\t\tMAE: {mae_score}\n\t\tR2: {r2_score}")
 
     # Guardado del modelo y de las métricas
-    algoritmo = model.__class__.__name__
+    algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
     path = os.path.join(root_path, f"Modelos/entrada_amperaje_multi_VE/Inversor_{inv_id - 20}/Repositorio/{algoritmo}-{pd.Timestamp.now()}/")
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
-        pickle.dump(model, archivo_salida)
+        pickle.dump(pipeline_model, archivo_salida)
     with open(path+'informe_modelo.json', 'w') as archivo_json:
         informe = {"normalizacion": normalizacion,
                    "optimizacion": optimizacion,
                     "metricas": metricas,
-                    "hiperparametros": {k:v for k,v in model.named_steps["regressor"].get_params().items() if v != None},
+                    "hiperparametros": {k:v for k,v in pipeline_model.named_steps["regressor"].get_params().items() if v != None},
                     "input_description": processed_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
                     "target": (y * num_strings).reset_index().melt(id_vars=["datetime_utc", "dispositivo_id"], var_name="entrada_id", value_name="amp_dc")[["amp_dc"]].describe().to_dict()}
         json.dump(informe, archivo_json)
@@ -574,7 +610,6 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     plt.ylabel("Valores predichos")
     plt.title("Comparación de valores reales y predichos")
     plt.savefig(path + "scatter_validacion.png")
-    plt.close()
 
     plt.figure()
     plt.tight_layout()
@@ -668,3 +703,4 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     ax1.grid(True, which='major', color='gray', linewidth=0.5)
     ax2.grid(True, which='minor', color='gray', linewidth=0.5)
     plt.savefig(path + "rmse_hora.png")
+    plt.close("all")
