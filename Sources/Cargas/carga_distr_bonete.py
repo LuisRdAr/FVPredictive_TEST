@@ -6,7 +6,7 @@ import os
 
 if __name__ == "__main__":
     # Carga, desde la ruta de ejecución, de los parámetros para conexión a la base de datos  
-    root_path = "/home/upo/Desktop/Test_FVPredictive/FVPredictive_TEST/Bonete"
+    root_path = os.getcwd()
     params = None
     for filename in os.listdir(root_path):
         if "params.json" in filename:
