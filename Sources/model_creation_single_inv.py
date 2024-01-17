@@ -7,145 +7,116 @@ import warnings
 import json
 import pickle
 import os
+import sys
 from tqdm import tqdm
 warnings.simplefilter(action='ignore', category=FutureWarning)
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.model_selection import GridSearchCV, train_test_split
-from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+from hyperopt import fmin, tpe, hp, Trials
+from functools import partial
+from sklearn.metrics import mean_squared_error as mse, \
+                            mean_absolute_error as mae, \
+                            r2_score as r2
+from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 
-class degree_scaler(BaseEstimator, TransformerMixin):
-    def __init__(self):
-        self.columns_to_scale_90 = None
-        self.columns_to_scale_180 = None
-        self.columns_to_scale_360 = None
-        
-    def fit(self, X, y = None):
-        self.columns_to_scale_90, self.columns_to_scale_180, self.columns_to_scale_360 = self.determine_columns_to_scale(X)
-        return self
+def objective(space_params, dtrain):
+    params = {'device': 'cuda',
+            'objective': 'reg:squarederror', 
+            'tree_method': "hist", 
+            'random_state': 0,
+            'n_jobs': -1,
+            'max_depth': int(space_params['max_depth']),
+            'gamma': space_params['gamma'],
+            'learning_rate': space_params['learning_rate'],
+            'min_child_weight': int(space_params['min_child_weight']),
+            'subsample': space_params['subsample'],
+            'reg_alpha': space_params['reg_alpha'],
+            'reg_lambda': space_params['reg_lambda'],
+             }
     
-    def transform(self, X, y = None):
-        scaled_data = X.copy()
-        if self.columns_to_scale_90 or self.columns_to_scale_180 or self.columns_to_scale_360:  
-            for column in self.columns_to_scale_90:
-                scaled_data[column] = X[column] / 90
-            for column in self.columns_to_scale_180:
-                min_val = X[column].min()
-                if min_val < 0:
-                    scaled_data[column] = (X[column] + 90) / 180
-                else:
-                    scaled_data[column] = X[column] / 180
-            for column in self.columns_to_scale_360:
-                min_val = X[column].min()
-                if min_val < 0:
-                    scaled_data[column] = (X[column] + 180) / 360
-                else:
-                    scaled_data[column] = X[column] / 360
-        return scaled_data
-    
-    def determine_columns_to_scale(self, X):
-        columns_90 = []
-        columns_180 = []
-        columns_360 = []
-        for column in X.columns:
-            min_val = X[column].min()
-            max_val = X[column].max()
-            if (min_val >= 0 and max_val <= 90):
-                columns_90.append(column)
-            elif (min_val >= -90 and max_val <= 90) or (min_val >= 0 and max_val <= 180):
-                columns_180.append(column)
-            elif (min_val >= -180 and max_val <= 180) or (min_val >= 0 and max_val <= 360):
-                columns_360.append(column)
-        return columns_90, columns_180, columns_360
+    cv_result = xgb.cv(params, dtrain, nfold = 5, num_boost_round = int(space_params["n_estimators"]), early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
+    score = cv_result['test-rmse-mean'].min()
+    return {'loss': score, 'status': STATUS_OK}
 
-    def get_feature_names_out(self, input_features=None):
-        if input_features is not None:
-            output_features = []
-            for feature in input_features:
-                output_features.append("scaled_" + feature)
-            return output_features
-        else:
-            return None
-    
-class percentage_scaler(BaseEstimator, TransformerMixin):
-    def __init__(self):
-        self.columns_to_scale = None
-        
-    def fit(self, X, y = None):
-        self.columns_to_scale_ = X.columns
-        return self
-    
-    def transform(self, X, y=None):
-        scaled_data = X.copy()
-        if self.columns_to_scale is not None:
-            for column in self.columns_to_scale:
-                scaled_column = "scaled_" + column
-                scaled_data[scaled_column] = X[column] / 100
-                scaled_data.drop(column, axis=1, inplace=True)
-        return scaled_data
+def discriminador(x, norm):
 
-    def get_feature_names_out(self, input_features=None):
-        if input_features is not None:
-            output_features = []
-            for feature in input_features:
-                output_features.append("scaled_" + feature)
-            return output_features
-        else:
-            return None
+    if norm:
+        amp_dc_norm = x["amp_dc"]
+    else:
+        amp_dc_norm = x["amp_dc"] / x["num_strings"]
 
-def discriminador(x):
+    amp_dc_std = 3 * amp_dc_norm.std()
+    amp_dc_mean = amp_dc_norm.mean()
 
-    amp_dc_norm = x["amp_dc"]
-    amp_dc_sum = amp_dc_norm.sum() - amp_dc_norm
-    amp_dc_std = 3 * amp_dc_sum.std()
-    amp_dc_mean = amp_dc_sum / (x["amp_dc"].count() - 1)
-    outlier = []
-    for pair in zip(amp_dc_norm, amp_dc_mean):
-        if (pair[0] > pair[1] + amp_dc_std) or (pair[0] < pair[1] - amp_dc_std):
-            outlier.append(True)
-        else:
-            outlier.append(False)
-    results = x[["datetime_utc", "dispositivo_id", "entrada_id"]]
+    outlier = (amp_dc_norm > amp_dc_mean + amp_dc_std) | (amp_dc_norm < amp_dc_mean - amp_dc_std)
+
+    results = x[["id", "datetime_utc", "dispositivo_id", "entrada_id"]]
     results["outlier_2"] = outlier
     results = results.reset_index(drop=True)
     return results
 
-print("Comienzo de la ejecución del programa")
-print(f"Hora: {pd.Timestamp.now()}")
+# valid_models = {"1": "XGBRegressor", "2": "RandomForestRegressor"}
+# model_name = ""
+# while model_name not in valid_models.keys():
+#     model_name = input("Ingrese el valor numérico para el tipo de modelo que desea utilizar (XGBRegressor[1], RandomForestRegressor[2]): ")
+# model_name = valid_models[model_name]
+model_name = "XGBRegressor"
 
-# Carga de los parámetros en función del sistema operativo usado
+valid_responses = ["y", "n"]
+normalizacion = ""
+while normalizacion not in valid_responses:
+    normalizacion = input("¿Desea normalizar el target? (Y/N): ").lower()
+normalizacion = normalizacion == "y"
+
+optimizacion = ""
+while optimizacion not in valid_responses:
+    optimizacion = input("¿Desea optimizar el modelo? (Y/N): ").lower()
+optimizacion = optimizacion == "y"
+
+use_cv = False
+if optimizacion:
+    while use_cv not in valid_responses:
+        use_cv = input("\t¿Desea utilizar validación cruzada? (Y/N): ").lower()
+    use_cv = use_cv == "y"
+
+print(f"\nLas opciones seleccionadas son: \nModelo: {model_name} \nNormalización: {normalizacion} \nOptimización: {optimizacion} \nValidación cruzada: {use_cv}", end="\n\n")
+
 root_path = os.getcwd()
-with open(os.path.join(root_path,'galisteodb_params.json')) as f:
-    params = json.load(f)
+params = None
+for filename in os.listdir(root_path):
+    if "params.json" in filename:
+        with open(os.path.join(root_path, filename)) as f:
+            params = json.load(f)
+if params is None:
+    print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
+    sys.exit()
+data_path = os.path.join(root_path, params["data_path"])
 schema_name = params["schema"]
 
 password = params['password'].replace('@', '%40')
 engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
-
-inv_ids_query = """SELECT DISTINCT(dispositivo_id) FROM galisteo.inversores"""
-inv_ids = np.sort([id[0] for id in pd.read_sql_query(inv_ids_query, engine).values])
+print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
 
 num_mod_string = 30
 sup_mod = 2
-
-for inv_id in tqdm(inv_ids, total = len(inv_ids)):
+# Carga de los datos de entrenamiento
+if schema_name == "galisteo":
     main_query = f"""
         WITH f AS (
             SELECT *
                 FROM {schema_name}.inversores
-                WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 15 = 0)
+                WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
                     AND (EXTRACT(SECOND FROM datetime_utc) = 0)
-                    AND (EXTRACT(MONTH FROM datetime_utc) != 9
-                        OR EXTRACT(MONTH FROM datetime_utc) != 10)
+                    AND (EXTRACT(MONTH FROM datetime_utc) != 10)
                     AND (alarma = 0)
-                    AND (dispositivo_id = {inv_id})
                     AND (estado = 6)
                 ORDER BY datetime_utc)
         SELECT f.id, f.dispositivo_id, det.entrada_id, f.datetime_utc, potencia_act, lim_act, num_strings, 
-                rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, vel_viento,
-                elevation, azimuth, cloud_impact, motivo, consigna_pot_act_planta, amp_dc
+                rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, cloud_impact, 
+                motivo, consigna_pot_act_planta, amp_dc
             FROM f
             JOIN {schema_name}.inversores_detalle AS det
                 ON f.id = det.id
@@ -160,230 +131,425 @@ for inv_id in tqdm(inv_ids, total = len(inv_ids)):
             JOIN {schema_name}.ree AS ree
                 ON ree.datetime_utc = f.datetime_utc
             WHERE daylight = true
-            ORDER BY 3, 1, 2;"""
-    chunksize = 100000
-    chunks = pd.read_sql_query(main_query, engine, chunksize=chunksize)
-    main_df = pd.DataFrame()
-    for chunk in chunks:
-        main_df = pd.concat([main_df, chunk], ignore_index = True)
-    
+            ORDER BY 4, 2, 3;"""
+elif schema_name == "bonete":   
+        main_query = f"""
+            WITH inv AS (
+                SELECT *
+                    FROM {schema_name}.inversores
+                    WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
+                        AND (EXTRACT(SECOND FROM datetime_utc) = 0)
+                        AND (alarma = 0)
+                        AND (estado = 6)),
+                met AS (
+                    SELECT datetime_utc, AVG(rad_poa) AS rad_poa, AVG(rad_hor) AS rad_hor, AVG(rad_celda1) AS rad_celda1,
+                            AVG(rad_celda2) AS rad_celda2, AVG(temp_amb) AS temp_amb, AVG(temp_panel1) AS temp_panel1,
+                            AVG(temp_panel2) AS temp_panel2, AVG(cloud_impact) AS cloud_impact, BOOL_OR(daylight) AS daylight
+                        FROM {schema_name}.meteo
+                        GROUP BY datetime_utc)
+            SELECT inv.id, inv.dispositivo_id, det.entrada_id, inv.datetime_utc, potencia_act, lim_act, num_strings, 
+                    rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, cloud_impact, 
+                    motivo, consigna_pot_act_ree, amp_dc
+                FROM inv
+                JOIN {schema_name}.inversores_detalle AS det
+                    ON inv.id = det.id
+                JOIN {schema_name}.distrib_inversores dist
+                    ON  dist.dispositivo_id = inv.dispositivo_id
+                        AND dist.entrada_id = det.entrada_id
+                JOIN met
+                    ON met.datetime_utc = inv.datetime_utc
+                JOIN {schema_name}.ree AS ree
+                    ON ree.datetime_utc = inv.datetime_utc
+                WHERE daylight = true
+                ORDER BY 4, 2, 3;"""
+else:
+    print("Esquema no reconocido")
+    sys.exit()
+chunksize = 100000
+chunks = pd.read_sql_query(main_query, engine, chunksize=chunksize)
+main_df = pd.DataFrame()
+for chunk in chunks:
+    main_df = pd.concat([main_df, chunk], ignore_index = True)
+
+# Normalización de la entrada de corriente continua, formateo de fechas y escalado de potencia
+print(f"\tCarga inicial de {main_df.shape[0]} registros")
+if normalizacion:
+    print("\tEntrada de corriente continua normalizada según el número de strings")
     main_df["amp_dc"] = main_df["amp_dc"]/main_df["num_strings"]
-    main_df["datetime_utc"] = pd.to_datetime(main_df["datetime_utc"], utc = True)
-    main_df["potencia_act"] = main_df["potencia_act"] * 1000
-    main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"])
-    main_df["temp_panel"] = (main_df["temp_panel1"] + main_df["temp_panel2"]) / 2
-    main_df = main_df.drop(columns = ["rad_celda1", "rad_celda2", "temp_panel1", "temp_panel2"])
-    potencia_df = main_df.groupby(["dispositivo_id", "datetime_utc"]).agg({"num_strings": "sum",
-                                                        "rad_poa": "mean",
-                                                        "potencia_act": "mean"
-                                                        }).reset_index()
-    potencia_df["potencia_solar"] = potencia_df["rad_poa"] * potencia_df["num_strings"] * num_mod_string * sup_mod 
-    potencia_df["outlier_1"] = np.where(potencia_df["potencia_act"] > 0.20 * potencia_df["potencia_solar"], True, False)
-    main_df = main_df.merge(potencia_df[["dispositivo_id", "datetime_utc", "outlier_1"]], on = ["dispositivo_id", "datetime_utc"])
-    main_df = main_df[main_df["outlier_1"] == False]
-    main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] > 12.5)|(main_df["amp_dc"] < -0.1)]["id"].unique()))]
-    main_df["motivo"] = main_df["motivo"].apply(lambda x: 0 if x == 0 else (2 if x == 7 else 1))
-    main_query = f"""
-        SELECT MAX(consigna_pot_act_ree)
-            FROM {schema_name}.ree AS ree;"""
-    max_pot_act = pd.read_sql_query(main_query, engine).values[0][0]
-    main_df["consigna_pot_act_planta"] = main_df["consigna_pot_act_planta"] / max_pot_act 
-    main_df["dia_año"] = main_df["datetime_utc"].dt.dayofyear
-    main_df["dia_año_sen"] = np.sin(main_df["dia_año"] * (2*np.pi/365))
-    main_df["dia_año_cos"] = np.cos(main_df["dia_año"] * (2*np.pi/365))
-    main_df["hora_seg"] = main_df["datetime_utc"].dt.hour * 3600 + \
-                            main_df["datetime_utc"].dt.minute * 60 + \
-                            main_df["datetime_utc"].dt.second
-    main_df["hora_seg_sen"] = np.sin(main_df["hora_seg"] * (2*np.pi/86400))
-    main_df["hora_seg_cos"] = np.cos(main_df["hora_seg"] * (2*np.pi/86400))
-    main_df = main_df.dropna()
-    outliers = main_df.groupby(['datetime_utc', 'dispositivo_id']).apply(discriminador).reset_index(drop=True)
-    main_df = pd.merge(main_df, outliers[outliers["outlier_2"] == False], on = ["datetime_utc", "dispositivo_id", "entrada_id"])
-    processed_df = main_df.drop(columns = ["id",
-                                        "datetime_utc",
-                                        "dispositivo_id", 
-                                        "entrada_id",
-                                        "dia_año",
-                                        "hora_seg",
-                                        "potencia_act",
-                                        "outlier_1",
-                                        "outlier_2",
-                                        "num_strings"
-                                        ])
+else:
+    print("\tEntrada de corriente continua sin normalizar")
+main_df["datetime_utc"] = pd.to_datetime(main_df["datetime_utc"], utc = True)
+main_df["potencia_act"] = main_df["potencia_act"] * 1000
 
-    y = processed_df["amp_dc"]
+# Manipulación de variables meteorológicas
+main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"])
+main_df["temp_panel"] = (main_df["temp_panel1"] + main_df["temp_panel2"]) / 2
+main_df = main_df.drop(columns = ["rad_celda1", "rad_celda2", "temp_panel1", "temp_panel2"])
+
+# Búsqueda de outliers basándose en la potencia activa y la potencia solar
+potencia_df = main_df.groupby(["dispositivo_id", "datetime_utc"]).agg({"num_strings": "sum",
+                                                            "rad_poa": "mean",
+                                                            "potencia_act": "mean"
+                                                            }).reset_index()
+potencia_df["potencia_solar"] = potencia_df["rad_poa"] * potencia_df["num_strings"] * num_mod_string * sup_mod 
+potencia_df["outlier_1"] = np.where(potencia_df["potencia_act"] > 0.20 * potencia_df["potencia_solar"], True, False)
+main_df = main_df.merge(potencia_df[["dispositivo_id", "datetime_utc", "outlier_1"]], on = ["dispositivo_id", "datetime_utc"])
+print(f"\tRegistros descartados por outlier de potencia: {main_df[main_df['outlier_1'] == True].shape[0]}")
+main_df = main_df[main_df["outlier_1"] == False]
+
+# Descarte de datos con corrientes negativa o muy grandes
+print(f"\tRegistros descartados por corriente negativa: {main_df[(main_df['id'].isin(main_df[(main_df['amp_dc'] < -0.1)]['id'].unique()))].shape[0]}")
+if normalizacion:
+    main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] < -0.1)]["id"].unique()))]
+else:
+    main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] < -1)]["id"].unique()))]
+amp_dc_mean = main_df["amp_dc"].mean() 
+amp_dc_std = main_df["amp_dc"].std()
+print(f"\tRegistros descartados por corrientes altas: {main_df[(main_df['id'].isin(main_df[(main_df['amp_dc'] > amp_dc_mean + 3 * amp_dc_std)]['id'].unique()))].shape[0]}")
+main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] > amp_dc_mean + 3 * amp_dc_std)]["id"].unique()))]
+
+# Manipulación de variables de consigna
+main_df["motivo"] = main_df["motivo"].apply(lambda x: 0 if x == 0 else (2 if x == 7 else 1))
+main_query = f"""
+    SELECT MAX(consigna_pot_act_ree)
+        FROM {schema_name}.ree AS ree;"""
+max_pot_act = pd.read_sql_query(main_query, engine).values[0][0]
+if schema_name == "galisteo":
+    main_df["consigna_pot_act_planta"] = main_df["consigna_pot_act_planta"] * 100 / max_pot_act 
+elif schema_name == "bonete":
+    main_df["consigna_pot_act_planta"] = main_df["consigna_pot_act_ree"] * 100 / max_pot_act 
+    main_df = main_df.drop(columns=["consigna_pot_act_ree"])
+
+# Asignación de variables temporales
+main_df["dia_año"] = main_df["datetime_utc"].dt.dayofyear
+main_df["dia_año_sen"] = np.sin(main_df["dia_año"] * (2*np.pi/365))
+main_df["hora_seg"] = main_df["datetime_utc"].dt.hour * 3600 + \
+                        main_df["datetime_utc"].dt.minute * 60 + \
+                        main_df["datetime_utc"].dt.second
+main_df["hora_seg_sen"] = np.sin(main_df["hora_seg"] * (2*np.pi/86400))
+
+# Búsqueda de outliers en la corriente continua basándose en la desviación dentro del comportamiento del inversor en un instante dado
+outliers = main_df.groupby(['datetime_utc', 'dispositivo_id']).apply(lambda x: discriminador(x, normalizacion)).reset_index(drop=True)
+print(f"\tRegistros descartados por outlier de corriente: {main_df[(main_df['id'].isin(outliers[outliers['outlier_2'] == True]['id'].unique()))].shape[0]}")
+main_df = main_df[~(main_df["id"].isin(outliers[outliers["outlier_2"] == True]["id"].unique()))]
+
+# Escalado de variables porcentuales
+main_df[['lim_act', 'cloud_impact', 'consigna_pot_act_planta']] = main_df[['lim_act', 'cloud_impact', 'consigna_pot_act_planta']].apply(lambda x: x/100)
+
+for inv_id in np.sort(main_df["dispositivo_id"].unique()):
+    # Separación de los datos de entrenamiento y validación
+    print(f"Dispositivo {inv_id}")
+    disp_df = main_df[main_df["dispositivo_id"] == inv_id].copy()
+    disp_df.dropna()
+    validation_df = disp_df[disp_df["datetime_utc"].dt.month == 9]
+    train_df = disp_df[disp_df["datetime_utc"].dt.month != 9]
+    print(f"\tRegistros de entrenamiento: {disp_df.shape[0]}")
+    print(f"\tRegistros de validación: {validation_df.shape[0]}")
+
+    # Descarte de variables que no se usarán en el entrenamiento y separación de input y target
+    processed_df = train_df.drop(columns = ["id",
+                                    "dia_año",
+                                    "hora_seg",
+                                    "potencia_act",
+                                    "outlier_1",
+                                    "num_strings"
+                                    ]).set_index(["datetime_utc",
+                                                    "dispositivo_id",
+                                                    "entrada_id"])
+    processed_val_df = validation_df.drop(columns = ["id",
+                                    "dia_año",
+                                    "hora_seg",
+                                    "potencia_act",
+                                    "outlier_1",
+                                    "num_strings"
+                                    ]).set_index(["datetime_utc",
+                                                    "dispositivo_id",
+                                                    "entrada_id"])
+        
+    y = processed_df[["amp_dc"]]
+    y_val = processed_val_df[["amp_dc"]]
     X = processed_df.drop(columns = ["amp_dc"])
-    X_train, X_test, y_train, y_test = train_test_split(X, 
-                                                        y, 
-                                                        test_size = 0.2, 
-                                                        random_state=42)
+    X_val = processed_val_df.drop(columns = ["amp_dc"])
+    print(f"\tNúmero de registros para entrenamiento: {X.shape[0]}")
 
-    perc_attr = ['lim_act', 'cloud_impact']
-    std_attr = ['rad_poa', 'rad_hor', 'temp_amb', 'vel_viento', 'rad_diff', 'temp_panel']
-    degree_attr = ['azimuth', 'elevation']
+    # Estandarización/normalización de variables numéricas y codificación de variables categóricas
+    perc_attr = ['lim_act', 'cloud_impact', 'consigna_pot_act_planta']
+    std_attr = ['rad_poa', 'rad_hor', 'temp_amb', 'rad_diff', 'temp_panel']
     cat_attr = ['motivo']
 
-    transformador_categorico = Pipeline([('onehot', OneHotEncoder(handle_unknown = 'ignore'))])
-    transformador_numerico_perc = Pipeline([('perc_scaler', percentage_scaler())]) 
+    transformador_categorico = Pipeline([('onehot', OneHotEncoder(handle_unknown = 'ignore'))])     # Introducir manualmente catergorías?
     transformador_numerico_std = Pipeline([('std_scaler', StandardScaler())]) 
-    transformador_numerico_deg = Pipeline([('degree_scaler', degree_scaler())])
 
     preprocessor = ColumnTransformer(transformers=[('cat', transformador_categorico, cat_attr),
-                                                    ('perc', transformador_numerico_perc, perc_attr),
-                                                    ('std', transformador_numerico_std, std_attr),
-                                                    ('deg', transformador_numerico_deg, degree_attr)],
-                                    remainder='passthrough')
-                                    
-    model = Pipeline(steps=[('preprocessor', preprocessor),
-                            ('regressor', XGBRegressor())
-                    ])
+                                                ('std', transformador_numerico_std, std_attr)],
+                                remainder='passthrough')
+
+    X_prep = preprocessor.fit_transform(X)
+    dtrain = xgb.DMatrix(X_prep, label=y)
+        
+    # Entrenamiento del modelo y construcción del dataframe para validación
+    if optimizacion:
+        # Inicialización  y primera fase de la optimización de hiperparámetros con gamma = 1 y espacio de búsqueda general
+        trials = Trials()
+        best_loss = np.inf
+        threshold = 0.001
+        gamma = 1
+        stall_counter = 0
+        STALL_LIMIT = 3
+        MAX_EVALS_PER_RUN = 250
+        total_evals = 0
+        run_counter = 0
+        if use_cv:
+            if model_name == "XGBRegressor":
+                space ={'max_depth': hp.quniform("max_depth", 3, 15, 3),
+                    'n_estimators': hp.quniform('n_estimators', 100, 1500, 200),
+                    'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
+                    'gamma': hp.quniform ('gamma', 0, 1, 0.2),
+                    'min_child_weight' : hp.quniform('min_child_weight', 1, 19, 3),
+                    'subsample' : hp.quniform('subsample', 0.5, 1, 0.1),
+                    'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 1),
+                    'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 1)
+                }
+                upper_limit = (MAX_EVALS_PER_RUN/(STALL_LIMIT - 1)) * 10
+                while stall_counter < STALL_LIMIT and total_evals < upper_limit:
+                    best = fmin(fn = partial(objective, dtrain=dtrain), 
+                                space = space,
+                                algo = partial(tpe.suggest, gamma = gamma),
+                                max_evals = total_evals + MAX_EVALS_PER_RUN,
+                                trials = trials)
+                    new_loss = trials.best_trial['result']['loss']
+                    if new_loss < best_loss:
+                        if abs(new_loss - best_loss) <= threshold:
+                            stall_counter += 1
+                        else:
+                            stall_counter = 0
+                        best_loss = new_loss
+                    else:
+                        stall_counter += 1
+
+                    total_evals += MAX_EVALS_PER_RUN
+                    run_counter += 1
+
+                    if total_evals % (MAX_EVALS_PER_RUN/(STALL_LIMIT - 1)) == 0:
+                        gamma = max(0, gamma - 0.05)
+                    print(f"Run {run_counter}: Best loss so far: {best_loss}")
+
+                print(f"\tMejor combinación de hiperparámetros en la primera búsqueda:\n{best}")
+
+                # Segunda fase de la optimización de hiperparámetros con gamma = 0.33 y espacio de búsqueda fino
+                stall_counter = 0
+                STALL_LIMIT = 5
+                MAX_EVALS_PER_RUN = 250
+                initial_total_evals = total_evals
+                run_counter = 0
+                space ={'max_depth': hp.quniform("max_depth", 3, 15, 1),
+                        'n_estimators': hp.quniform('n_estimators', 100, 1500, 25),
+                        'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
+                        'gamma': hp.quniform ('gamma', 0, 1, 0.01),
+                        'min_child_weight' : hp.quniform('min_child_weight', 1, 20, 1),
+                        'subsample' : hp.quniform('subsample', 0.5, 1, 0.05),
+                        'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 0.1),
+                        'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 0.1)
+                    }
+                while stall_counter < STALL_LIMIT and total_evals < initial_total_evals + 10000:
+                    best = fmin(fn = partial(objective, dtrain=dtrain), 
+                                space = space, 
+                                algo = partial(tpe.suggest, gamma = 0.33), 
+                                max_evals = total_evals + MAX_EVALS_PER_RUN, 
+                                trials = trials)
                     
-    param_grid = {'regressor__max_depth': list(range(3, 14, 2)),
-                'regressor__n_estimators': list(range(100, 1600, 200)),
-                'regressor__min_child_weight': list(range(2, 11, 2)),
-                'regressor__learning_rate': [0.1, 0.05, 0.01]
-                }
-    print("Comienzo de la primera fase de optimización del modelo (max_depth, n_estimators, min_child_weight)")
-    print(f"Hora: {pd.Timestamp.now()}")
-    print(f"Número de combinaciones: {len(param_grid['regressor__max_depth']) * \
-                                    len(param_grid['regressor__n_estimators']) * \
-                                    len(param_grid['regressor__min_child_weight']) * \
-                                    len(param_grid['regressor__learning_rate'])}")
-    grid_search = GridSearchCV(model, param_grid, cv=5)
-    grid_search.fit(X_train, y_train)
-    dict_hiperparam = {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None}
-    print("Mejor combinación de hiperparámetros: ", dict_hiperparam)
-    print("Score: ", grid_search.best_score_)
+                    new_loss = trials.best_trial['result']['loss']
+                    if new_loss < best_loss:
+                        best_loss = new_loss
+                        stall_counter = 0
+                    else:
+                        stall_counter += 1
 
-    param_grid = {'regressor__max_depth': list(range(dict_hiperparam["max_depth"] - 1, dict_hiperparam["max_depth"] + 2, 1)),
-                'regressor__n_estimators': list(range(dict_hiperparam["n_estimators"] - 100, dict_hiperparam["n_estimators"] + 150, 50)),
-                'regressor__min_child_weight': list(range(dict_hiperparam["min_child_weight"] - 1, dict_hiperparam["min_child_weight"] + 2, 1)),
-                'regressor__learning_rate': [dict_hiperparam["learning_rate"]],
-                'regressor__subsample': [0.8, 0.9, 1],
-                'regressor__gamma': [i/10.0 for i in range(0,5)]
-                }
-    print("Comienzo de la segunda fase de optimización del modelo (subsample, gamma)")
-    print(f"Hora: {pd.Timestamp.now()}")
-    print(f"Número de combinaciones: {len(param_grid['regressor__max_depth']) * \
-                                    len(param_grid['regressor__n_estimators']) * \
-                                    len(param_grid['regressor__min_child_weight']) * \
-                                    len(param_grid['regressor__subsample']) * \
-                                    len(param_grid['regressor__gamma'])}")
-    grid_search = GridSearchCV(model, param_grid, cv=5)
-    grid_search.fit(X_train, y_train)
-    dict_hiperparam = {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None}
-    print("Mejor combinación de hiperparámetros: ", dict_hiperparam)
-    print("Score: ", grid_search.best_score_)
+                    total_evals += MAX_EVALS_PER_RUN
+                    run_counter += 1
+                    print(f"Run {run_counter}: Best loss so far: {best_loss}")
 
-    param_grid = {'regressor__max_depth': list(range(dict_hiperparam["max_depth"] - 1, dict_hiperparam["max_depth"] + 2, 1)),
-                'regressor__n_estimators': list(range(dict_hiperparam["n_estimators"] - 50, dict_hiperparam["n_estimators"] + 100, 50)),
-                'regressor__min_child_weight': list(range(dict_hiperparam["min_child_weight"] - 1, dict_hiperparam["min_child_weight"] + 2, 1)),
-                'regressor__learning_rate': [dict_hiperparam["learning_rate"]],
-                'regressor__subsample': [dict_hiperparam["subsample"]],
-                'regressor__gamma': [dict_hiperparam["gamma"]],
-                'regressor__reg_alpha': list(range(0,5)/4),
-                'regressor__reg_lambda': list(range(0,5)/4),
-                }
-    print("Comienzo de la tercera fase de optimización del modelo (reg_alpha, reg_lambda)")
-    print(f"Hora: {pd.Timestamp.now()}")
-    print(f"Número de combinaciones: {len(param_grid['regressor__max_depth']) * \
-                                    len(param_grid['regressor__n_estimators']) * \
-                                    len(param_grid['regressor__min_child_weight']) * \
-                                    len(param_grid['regressor__reg_alpha']) * \
-                                    len(param_grid['regressor__reg_lambda'])}")
-    grid_search = GridSearchCV(model, param_grid, cv=5)
-    grid_search.fit(X_train, y_train)
-    dict_hiperparam = {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None}
-    print("Mejor combinación de hiperparámetros: ", dict_hiperparam)
-    print("Score: ", grid_search.best_score_)
+                print(f"\tMejor combinación de hiperparámetros:\n{best}")
 
-    # param_grid = {'regressor__max_depth': list(range(dict_hiperparam["max_depth"] - 1, dict_hiperparam["max_depth"] + 2, 1)),
-    #             'regressor__n_estimators': list(range(dict_hiperparam["n_estimators"] - 100, dict_hiperparam["n_estimators"] * 5, 200)),
-    #             'regressor__min_child_weight': list(range(dict_hiperparam["min_child_weight"] - 1, dict_hiperparam["min_child_weight"] + 2, 1)),
-    #             'regressor__subsample': [dict_hiperparam["subsample"]],
-    #             'regressor__gamma': [dict_hiperparam["gamma"]],
-    #             'regressor__reg_alpha': [dict_hiperparam["reg_alpha"]],
-    #             'regressor__reg_lambda': [dict_hiperparam["reg_lambda"]],
-    #             'regressor__learning_rate': [0.1, 0.05, 0.01]
-    #             }
-    # print("Comienzo de la cuarta fase de optimización del modelo (n_estimators, learning_rate)")
-    # print(f"Hora: {pd.Timestamp.now()}")
-    # print(f"Número de combinaciones: {len(param_grid['regressor__max_depth']) * \
-    #                                 len(param_grid['regressor__n_estimators']) * \
-    #                                 len(param_grid['regressor__min_child_weight']) * \
-    #                                 len(param_grid['regressor__reg_alpha']) * \
-    #                                 len(param_grid['regressor__reg_lambda'])}")
-    # grid_search = GridSearchCV(model, param_grid, cv=5)
-    # grid_search.fit(X_train, y_train)
-    # dict_hiperparam = {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None}
-    # print("Mejor combinación de hiperparámetros: ", dict_hiperparam)
-    # print("Score: ", grid_search.best_score_)
+                params = {'max_depth': int(best['max_depth']),
+                                'gamma': best['gamma'],
+                                'learning_rate': best['learning_rate'],
+                                'min_child_weight': best['min_child_weight'],
+                                'subsample': best['subsample'],
+                                'reg_alpha': best['reg_alpha'],
+                                'reg_lambda': best['reg_lambda'],
+                                'device': 'cuda',
+                                'tree_method': 'hist',
+                                'objective': 'reg:squarederror',
+                                'random_state': 0,
+                                'n_jobs': -1
+                            }
+                
+                model = xgb.train(params, dtrain, num_boost_round = int(best['n_estimators']))
+            else:
+                print("Modelo no implementado o no reconocido")
+                sys.exit()
 
-    param_grid = {'regressor__max_depth': list(range(dict_hiperparam["max_depth"] - 1, dict_hiperparam["max_depth"] + 2, 1)),
-                'regressor__n_estimators': list(range(dict_hiperparam["n_estimators"] - 150, dict_hiperparam["n_estimators"] + 250, 50)),
-                'regressor__min_child_weight': list(range(dict_hiperparam["min_child_weight"] - 1, dict_hiperparam["min_child_weight"] + 2, 1)),
-                'regressor__subsample': [dict_hiperparam["subsample"]],
-                'regressor__gamma': [dict_hiperparam["gamma"]],
-                'regressor__reg_alpha': [dict_hiperparam["reg_alpha"]],
-                'regressor__reg_lambda': [dict_hiperparam["reg_lambda"]],
-                'regressor__learning_rate': [dict_hiperparam["learning_rate"]]
-                }
-    print("Entrenamiento del modelo final")
-    print(f"Hora: {pd.Timestamp.now()}")
-    grid_search = GridSearchCV(model, param_grid, cv=5)
-    grid_search.fit(X_train, y_train)
-    dict_hiperparam = {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None}
-    print("Hiperparámetros finales: ", dict_hiperparam)
-    print("Score: ", grid_search.best_score_)
+    else:
+        if model_name == "XGBRegressor":
+            params = {
+                'random_state': 0,
+                'n_jobs': -1
+            }
+            model = xgb.train(params, dtrain)
+        else:
+            print("Modelo no implementado o no reconocido")
+            sys.exit()
 
-    from sklearn.metrics import mean_squared_error as mse, \
-                                mean_absolute_error as mae, \
-                                r2_score as r2
+    pipeline_model = Pipeline([('preprocessor', preprocessor),
+                            ('regressor', model)])
 
-    y_pred = grid_search.best_estimator_.predict(X_test)
-    prediction_df = pd.DataFrame(y_test).join(main_df[["id", "dispositivo_id", "entrada_id", "datetime_utc", "num_strings"]])
+    prediction_df = y_val.copy()
+    dval = xgb.DMatrix(pipeline_model.named_steps['preprocessor'].transform(X_val))
+    prediction_df["y_pred"] = pipeline_model.named_steps['regressor'].predict(dval)
+
+    consulta_sql = f"""SELECT dispositivo_id, entrada_id, num_strings
+                        FROM {schema_name}.distrib_inversores;"""
+    num_strings = pd.read_sql_query(consulta_sql, engine)
+    prediction_df = prediction_df.reset_index().merge(num_strings, on = ["dispositivo_id", "entrada_id"]).set_index(["datetime_utc", "dispositivo_id", "entrada_id"])
     prediction_df["amp_dc"] = prediction_df["amp_dc"] * prediction_df["num_strings"]
-    prediction_df["y_pred"] = y_pred * prediction_df["num_strings"]
+    prediction_df["y_pred"] = prediction_df["y_pred"] * prediction_df["num_strings"]
     prediction_df["y_diff"] = prediction_df["amp_dc"] - prediction_df["y_pred"]
 
     rmse_score = round(mse(prediction_df["amp_dc"], prediction_df["y_pred"], squared = False),3)
     mae_score = round(mae(prediction_df["amp_dc"], prediction_df["y_pred"]),3)
     r2_score = round(r2(prediction_df["amp_dc"], prediction_df["y_pred"]),3)
-    rmse_p_score = round(mse(prediction_df["amp_dc"], prediction_df["y_pred"], squared = False)/prediction_df["amp_dc"].describe()["std"], 3)
-    metricas = {"RMSE": rmse_score, "MAE": mae_score, "NRMSE": rmse_p_score, "R2": r2_score}
+    metricas = {"RMSE": rmse_score, "MAE": mae_score, "R2": r2_score}
     print(f"RMSE: {rmse_score}", 
-        f"MAE: {mae_score}",
-        f"NRMSE: {rmse_p_score}",
-        f"R2: {r2_score}",
-        sep = "\n")
+            f"MAE: {mae_score}",
+            f"R2: {r2_score}",
+            sep = "\n")
 
-    columnas = [col_name.split("__")[1] for col_name in grid_search.best_estimator_.named_steps["preprocessor"].get_feature_names_out()]
-    importancia = grid_search.best_estimator_.named_steps["regressor"].feature_importances_.tolist()
-    algoritmo = type(grid_search.best_estimator_.named_steps["regressor"]).__name__
+    # Guardado del modelo y de las métricas
+    algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
+    columnas = [col_name.split("__")[1] for col_name in preprocessor.get_feature_names_out()]
+    importance_scores = model.get_score(importance_type='gain')
+    total_gain = np.array([v for k,v in importance_scores.items()]).sum()
+    importancia = {k: v/total_gain for k, v in importance_scores.items()}
     path = os.path.join(root_path, f"Modelos/entrada_amperaje/Inversor_{inv_id - 20}/Repositorio/{algoritmo}-{pd.Timestamp.now()}/")
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
-        pickle.dump(grid_search.best_estimator_, archivo_salida)
+        pickle.dump(pipeline_model, archivo_salida)
     with open(path+'informe_modelo.json', 'w') as archivo_json:
-        informe = {"metricas": metricas,
-                    "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia)}.items(), key=lambda item: item[1], reverse=True)),
-                    "hiperparametros": {k:v for k,v in grid_search.best_estimator_.named_steps["regressor"].get_params().items() if v != None},
-                    "param_grid": param_grid,
-                    "input_description": processed_df[perc_attr + std_attr + degree_attr].describe().loc[["mean", "std"]].to_dict(),
-                    "target": prediction_df["amp_dc"].describe().to_dict()}
+        informe = {"normalizacion": normalizacion,
+                    "optimizacion": optimizacion,
+                    "cross_validation": use_cv,
+                    "metricas": metricas,
+                    "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
+                    "validation_range": {"start": validation_df["datetime_utc"].min().strftime("%Y-%m-%d %H:%M:%S"), 
+                                            "end": validation_df["datetime_utc"].max().strftime("%Y-%m-%d %H:%M:%S")},
+                    "hiperparametros": {k:v for k,v in params.items() if v != None},
+                    "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
+                    "training_target_description": (train_df["amp_dc"] * train_df["num_strings"]).describe().to_dict(),
+                    }
         json.dump(informe, archivo_json)
 
+    # Generación de gráficos: comparativa de valores reales y predichos, histograma de diferencias y matriz de correlación
     y_test_sampled, _,y_pred_sampled, _ = train_test_split(prediction_df["amp_dc"], prediction_df["y_pred"], train_size = 0.25)
+    plt.figure()
+    plt.tight_layout()
     plt.scatter(y_test_sampled, y_pred_sampled, marker = ".")
     plt.plot([min(y_test_sampled), max(y_test_sampled)], [min(y_test_sampled), max(y_test_sampled)], color='black', linestyle='-', linewidth=1)
     plt.xlabel("Valores reales")
     plt.ylabel("Valores predichos")
-    plt.savefig(path+'dispersion_test_pred')
+    plt.title("Comparación de valores reales y predichos")
+    plt.savefig(path + "scatter_validacion.png")
 
     plt.figure()
-    ax = sns.histplot(y_test_sampled - y_pred_sampled, kde=True, stat='percent')
+    plt.tight_layout()
+    ax = sns.histplot(prediction_df["amp_dc"] - prediction_df["y_pred"], kde=True, stat='percent')
     ax.axvline(x=0, color='black', linestyle='--', linewidth = 0.35, label='x=0')
-    plt.title('Histograma de Diferencias entre y_test y y_pred')
+    plt.title('Histograma de las diferencias entre valores reales y predichos')
     plt.xlabel('Diferencia')
     plt.ylabel('Porcentaje')
-    plt.savefig(path+'histograma_diferencia_test_pred')
+    plt.savefig(path + "histogram_validacion.png")
+
+    plt.figure(figsize=(12, 8))
+    plt.tight_layout()
+    sns.heatmap(processed_df.corr(), annot=True, fmt=".2f", cmap="coolwarm")
+    plt.title("Matriz de correlación")
+    plt.savefig(path + "correlacion.png")
+
+    # Generación de gráficos: comparativa de RMSE y RMSE relativo por entrada
+    rmse_list = []
+    rmse_r_list = []
+    entrada_list = []
+    for group in prediction_df.groupby(["dispositivo_id", "entrada_id"]):
+        entrada_list.append(group[0][1])
+        rmse_score = round(mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False), 2)
+        rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/group[1]['amp_dc'].mean()), 2)
+        mae_score = round(mae(group[1]["amp_dc"], group[1]["y_pred"]), 2)
+        r2_score = round(r2(group[1]["amp_dc"], group[1]["y_pred"]), 3)
+        rmse_list.append(rmse_score)
+        rmse_r_list.append(rmse_r_score)
+
+        metricas_entrada = {"RMSE": rmse_score, "RMSE %": rmse_r_score, "MAE": mae_score, "R2": r2_score}
+        
+    fig, ax1 = plt.subplots()
+    color = 'tab:blue'
+    ax1.set_xlabel('Entrada')
+    ax1.set_ylabel('RMSE', color=color)
+    ax1.plot(entrada_list, rmse_list, color=color, linewidth=1)
+    sns.scatterplot(x=entrada_list, y=rmse_list, color=color, ax=ax1)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('RMSE Relativo', color=color)
+    if rmse_r_score.max() - rmse_r_score.min() > 0.25:
+        ax2.set_yscale('log')
+    ax2.plot(entrada_list, rmse_r_list, color=color, linewidth=1)
+    sns.scatterplot(x=entrada_list, y=rmse_r_list, color=color, ax=ax2)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title(f'Comparativa de RMSE y RMSE Relativo por entrada para el inversor {inv_id - 20}')
+    plt.xticks(entrada_list)
+    plt.tight_layout()
+    ax1.grid(True, which='major', color='gray', linewidth=0.5)
+    ax2.grid(True, which='minor', color='gray', linewidth=0.5)
+    plt.savefig(path + "rmse_entrada.png")
+
+    # Generación de gráficos: comparativa de RMSE y RMSE relativo por hora
+    rmse_list = []
+    rmse_r_list = []
+    hora_list = []
+    for group in prediction_df.reset_index().groupby(["dispositivo_id", prediction_df.reset_index()["datetime_utc"].dt.hour]):
+        hora_list.append(group[0][1])
+        rmse_score = round(mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False), 2)
+        rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/group[1]['amp_dc'].mean()), 2)
+        mae_score = round(mae(group[1]["amp_dc"], group[1]["y_pred"]), 2)
+        r2_score = round(r2(group[1]["amp_dc"], group[1]["y_pred"]), 3)
+        rmse_list.append(rmse_score)
+        rmse_r_list.append(rmse_r_score)
+
+        metricas_entrada = {"RMSE": rmse_score, "RMSE %": rmse_r_score, "MAE": mae_score, "R2": r2_score}
+        
+    fig, ax1 = plt.subplots()
+    color = 'tab:blue'
+    ax1.set_xlabel('Hora')
+    ax1.set_ylabel('RMSE', color=color)
+    ax1.plot(hora_list, rmse_list, color=color, linewidth=1)
+    sns.scatterplot(x=hora_list, y=rmse_list, color=color, ax=ax1)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('RMSE Relativo', color=color)
+    if rmse_r_score.max() - rmse_r_score.min() > 0.25:
+        ax2.set_yscale('log')
+    ax2.plot(hora_list, rmse_r_list, color=color, linewidth=1)
+    sns.scatterplot(x=hora_list, y=rmse_r_list, color=color, ax=ax2)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title(f'Comparativa de RMSE y RMSE Relativo por hora para el inversor {inv_id - 20}')
+    plt.xticks(hora_list)
+    plt.tight_layout()
+    ax1.grid(True, which='major', color='gray', linewidth=0.5)
+    ax2.grid(True, which='minor', color='gray', linewidth=0.5)
+    plt.savefig(path + "rmse_hora.png")
+    plt.close("all")
