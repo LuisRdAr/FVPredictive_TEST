@@ -1,0 +1,10 @@
+{
+  "host": "localhost",
+  "dbname": "fvpredictive",
+  "user": "postgres",
+  "password": "postgres",
+  "port": 5432,
+  "data_path": "Datos/Nuevos/",
+  "schema": "alcazar"
+}
+

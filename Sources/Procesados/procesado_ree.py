@@ -43,7 +43,7 @@ if __name__ == "__main__":
     consulta_sql = f"SELECT COUNT(*) FROM {schema_name}.ree_raw WHERE procesado = false;"
     count = pd.read_sql_query(consulta_sql, engine).values[0][0]
     if count == 0:
-        print(f"No se han encontrado nuevos registros para procesar en {schema_name}.contador_red_raw")
+        print(f"No se han encontrado nuevos registros para procesar en {schema_name}.ree_raw")
         sys.exit()
         
     chunk_size = 2500000

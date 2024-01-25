@@ -109,8 +109,7 @@ if __name__ == "__main__":
             conn.commit()
         
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
-        meteo_df.drop(columns = ["parque_id",
-                                 "nombre_dispositivo", 
+        meteo_df.drop(columns = ["nombre_dispositivo", 
                                  "ref", 
                                  "descripcion_dispositivo", 
                                  "ubicacion"], inplace = True)
@@ -188,7 +187,8 @@ if __name__ == "__main__":
             # Se separan los registros de la estación que mide la humedad y los registros de viento y se descartan los registros fuera del rango natural
             hum_df = meteo_df[meteo_df["dispositivo_id"] == 41][["datetime_utc","hum_rel"]]
             hum_df = hum_df[(hum_df["hum_rel"] >= 0) & (hum_df["hum_rel"] <= 100)]
-            ane_df = meteo_df[(meteo_df["dispositivo_id"] >= 50) & (meteo_df["dispositivo_id"] < 60)].copy()
+            ane_df = meteo_df[((meteo_df["dispositivo_id"] >= 50) & (meteo_df["dispositivo_id"] < 60)) | 
+                                    (meteo_df["dispositivo_id"] == 41)].copy()
             clean_ane_df = ane_df[(ane_df["vel_viento"] >= 0) & (ane_df["vel_viento"] <= 100) &
                                   (ane_df["dir_viento"] >= 0) & (ane_df["dir_viento"] <= 360)]
             clean_ane_df = clean_ane_df.dropna(subset=["vel_viento", "dir_viento"])

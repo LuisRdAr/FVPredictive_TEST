@@ -88,7 +88,7 @@ valid_devices = ["cpu", "cuda"]
 device = ""
 if torch.cuda.is_available() and model_name == "XGBRegressor":
     while device not in valid_devices:
-        device = input("¿Desea utilizar GPU para el entrenamiento? (CPU/CUDA): ").lower()
+        device = input("¿Desea utilizar GPU para el entrenamiento? (CPU/GPU): ").lower()
 else:
     device = 'cpu'
 
@@ -246,6 +246,10 @@ main_df = main_df[~(main_df["id"].isin(outliers[outliers["outlier_2"] == True]["
 # Escalado de variables porcentuales
 main_df[['lim_act', 'cloud_impact', 'consigna_pot_act_planta']] = main_df[['lim_act', 'cloud_impact', 'consigna_pot_act_planta']].apply(lambda x: x/100)
 
+# Agrupación de las entradas de corriente continua por inversor y por hora en una tabla dinámica
+pivot_table = main_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc').sum(axis = 1)
+complete_df = pd.merge(main_df, pivot_table.reset_index(), on=["dispositivo_id", "datetime_utc"]).drop(columns=["entrada_id", "num_strings", "amp_dc"]).drop_duplicates().rename(columns={0: "amp_dc"})
+
 for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     # Separación de los datos de entrenamiento y validación
     print(f"Dispositivo {inv_id}")
@@ -260,7 +264,6 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     processed_df = train_df.drop(columns = ["id",
                                     "dia_año",
                                     "hora_seg",
-                                    "potencia_act",
                                     "outlier_1",
                                     "num_strings"
                                     ]).set_index(["datetime_utc",
@@ -269,22 +272,21 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     processed_val_df = validation_df.drop(columns = ["id",
                                     "dia_año",
                                     "hora_seg",
-                                    "potencia_act",
                                     "outlier_1",
                                     "num_strings"
                                     ]).set_index(["datetime_utc",
                                                     "dispositivo_id",
                                                     "entrada_id"])
         
-    y = processed_df[["amp_dc"]]
-    y_val = processed_val_df[["amp_dc"]]
-    X = processed_df.drop(columns = ["amp_dc"])
-    X_val = processed_val_df.drop(columns = ["amp_dc"])
+    y = processed_df[["potencia_act"]]
+    y_val = processed_val_df[["potencia_act"]]
+    X = processed_df.drop(columns = ["potencia_act"])
+    X_val = processed_val_df.drop(columns = ["potencia_act"])
     print(f"\tNúmero de registros para entrenamiento: {X.shape[0]}")
 
     # Estandarización/normalización de variables numéricas y codificación de variables categóricas
     perc_attr = ['lim_act', 'cloud_impact', 'consigna_pot_act_planta']
-    std_attr = ['rad_poa', 'rad_hor', 'temp_amb', 'rad_diff', 'temp_panel']
+    std_attr = ['rad_poa', 'rad_hor', 'temp_amb', 'rad_diff', 'temp_panel', 'amp_dc']
     cat_attr = ['motivo']
 
     transformador_categorico = Pipeline([('onehot', OneHotEncoder(handle_unknown = 'ignore'))])     # Introducir manualmente catergorías?
@@ -296,7 +298,7 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
 
     X_prep = preprocessor.fit_transform(X)
     dtrain = xgb.DMatrix(X_prep, label=y)
-        
+
     # Entrenamiento del modelo y construcción del dataframe para validación
     if optimizacion:
         # Inicialización  y primera fase de la optimización de hiperparámetros con gamma = 1 y espacio de búsqueda general
@@ -420,31 +422,24 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     prediction_df = y_val.copy()
     dval = xgb.DMatrix(pipeline_model.named_steps['preprocessor'].transform(X_val))
     prediction_df["y_pred"] = pipeline_model.named_steps['regressor'].predict(dval)
+    prediction_df["y_diff"] = prediction_df["potencia_act"] - prediction_df["y_pred"]
 
-    consulta_sql = f"""SELECT dispositivo_id, entrada_id, num_strings
-                        FROM {schema_name}.distrib_inversores;"""
-    num_strings = pd.read_sql_query(consulta_sql, engine)
-    prediction_df = prediction_df.reset_index().merge(num_strings, on = ["dispositivo_id", "entrada_id"]).set_index(["datetime_utc", "dispositivo_id", "entrada_id"])
-    prediction_df["amp_dc"] = prediction_df["amp_dc"] * prediction_df["num_strings"]
-    prediction_df["y_pred"] = prediction_df["y_pred"] * prediction_df["num_strings"]
-    prediction_df["y_diff"] = prediction_df["amp_dc"] - prediction_df["y_pred"]
-
-    rmse_score = round(mse(prediction_df["amp_dc"], prediction_df["y_pred"], squared = False),3)
-    mae_score = round(mae(prediction_df["amp_dc"], prediction_df["y_pred"]),3)
-    r2_score = round(r2(prediction_df["amp_dc"], prediction_df["y_pred"]),3)
+    rmse_score = round(mse(prediction_df["potencia_act"], prediction_df["y_pred"], squared = False),3)
+    mae_score = round(mae(prediction_df["potencia_act"], prediction_df["y_pred"]),3)
+    r2_score = round(r2(prediction_df["potencia_act"], prediction_df["y_pred"]),3)
     metricas = {"RMSE": rmse_score, "MAE": mae_score, "R2": r2_score}
     print(f"RMSE: {rmse_score}", 
             f"MAE: {mae_score}",
             f"R2: {r2_score}",
             sep = "\n")
-
+    
     # Guardado del modelo y de las métricas
     algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
     columnas = [col_name.split("__")[1] for col_name in preprocessor.get_feature_names_out()]
     importance_scores = model.get_score(importance_type='gain')
     total_gain = np.array([v for k,v in importance_scores.items()]).sum()
     importancia = {k: v/total_gain for k, v in importance_scores.items()}
-    path = os.path.join(root_path, f"Modelos/entrada_amperaje/Inversor_{inv_id - 20}/Repositorio/{algoritmo}-{pd.Timestamp.now()}/")
+    path = os.path.join(root_path, f"Modelos/potencia_inversor/Inversor_{inv_id - 20}/Repositorio/{algoritmo}-{pd.Timestamp.now()}/")
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
         pickle.dump(pipeline_model, archivo_salida)
@@ -458,12 +453,12 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
                                             "end": validation_df["datetime_utc"].max().strftime("%Y-%m-%d %H:%M:%S")},
                     "hiperparametros": {k:v for k,v in params.items() if v != None},
                     "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
-                    "training_target_description": (train_df["amp_dc"] * train_df["num_strings"]).describe().to_dict(),
+                    "training_target_description": train_df["potencia_act"].describe().to_dict(),
                     }
         json.dump(informe, archivo_json)
 
     # Generación de gráficos: comparativa de valores reales y predichos, histograma de diferencias y matriz de correlación
-    y_test_sampled, _,y_pred_sampled, _ = train_test_split(prediction_df["amp_dc"], prediction_df["y_pred"], train_size = 0.25)
+    y_test_sampled, _,y_pred_sampled, _ = train_test_split(prediction_df["potencia_act"], prediction_df["y_pred"], train_size = 0.25)
     plt.figure()
     plt.tight_layout()
     plt.scatter(y_test_sampled, y_pred_sampled, marker = ".")
@@ -475,7 +470,7 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
 
     plt.figure()
     plt.tight_layout()
-    ax = sns.histplot(prediction_df["amp_dc"] - prediction_df["y_pred"], kde=True, stat='percent')
+    ax = sns.histplot(prediction_df["potencia_act"] - prediction_df["y_pred"], kde=True, stat='percent')
     ax.axvline(x=0, color='black', linestyle='--', linewidth = 0.35, label='x=0')
     plt.title('Histograma de las diferencias entre valores reales y predichos')
     plt.xlabel('Diferencia')
@@ -487,82 +482,3 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     sns.heatmap(processed_df.corr(), annot=True, fmt=".2f", cmap="coolwarm")
     plt.title("Matriz de correlación")
     plt.savefig(path + "correlacion.png")
-
-    # Generación de gráficos: comparativa de RMSE y RMSE relativo por entrada
-    rmse_list = []
-    rmse_r_list = []
-    entrada_list = []
-    for group in prediction_df.groupby(["dispositivo_id", "entrada_id"]):
-        entrada_list.append(group[0][1])
-        rmse_score = round(mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False), 2)
-        rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/group[1]['amp_dc'].mean()), 2)
-        mae_score = round(mae(group[1]["amp_dc"], group[1]["y_pred"]), 2)
-        r2_score = round(r2(group[1]["amp_dc"], group[1]["y_pred"]), 3)
-        rmse_list.append(rmse_score)
-        rmse_r_list.append(rmse_r_score)
-
-        metricas_entrada = {"RMSE": rmse_score, "RMSE %": rmse_r_score, "MAE": mae_score, "R2": r2_score}
-        
-    fig, ax1 = plt.subplots()
-    color = 'tab:blue'
-    ax1.set_xlabel('Entrada')
-    ax1.set_ylabel('RMSE', color=color)
-    ax1.plot(entrada_list, rmse_list, color=color, linewidth=1)
-    sns.scatterplot(x=entrada_list, y=rmse_list, color=color, ax=ax1)
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('RMSE Relativo', color=color)
-    if rmse_r_score.max() - rmse_r_score.min() > 0.25:
-        ax2.set_yscale('log')
-    ax2.plot(entrada_list, rmse_r_list, color=color, linewidth=1)
-    sns.scatterplot(x=entrada_list, y=rmse_r_list, color=color, ax=ax2)
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    plt.title(f'Comparativa de RMSE y RMSE Relativo por entrada para el inversor {inv_id - 20}')
-    plt.xticks(entrada_list)
-    plt.tight_layout()
-    ax1.grid(True, which='major', color='gray', linewidth=0.5)
-    ax2.grid(True, which='minor', color='gray', linewidth=0.5)
-    plt.savefig(path + "rmse_entrada.png")
-
-    # Generación de gráficos: comparativa de RMSE y RMSE relativo por hora
-    rmse_list = []
-    rmse_r_list = []
-    hora_list = []
-    for group in prediction_df.reset_index().groupby(["dispositivo_id", prediction_df.reset_index()["datetime_utc"].dt.hour]):
-        hora_list.append(group[0][1])
-        rmse_score = round(mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False), 2)
-        rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/group[1]['amp_dc'].mean()), 2)
-        mae_score = round(mae(group[1]["amp_dc"], group[1]["y_pred"]), 2)
-        r2_score = round(r2(group[1]["amp_dc"], group[1]["y_pred"]), 3)
-        rmse_list.append(rmse_score)
-        rmse_r_list.append(rmse_r_score)
-
-        metricas_entrada = {"RMSE": rmse_score, "RMSE %": rmse_r_score, "MAE": mae_score, "R2": r2_score}
-        
-    fig, ax1 = plt.subplots()
-    color = 'tab:blue'
-    ax1.set_xlabel('Hora')
-    ax1.set_ylabel('RMSE', color=color)
-    ax1.plot(hora_list, rmse_list, color=color, linewidth=1)
-    sns.scatterplot(x=hora_list, y=rmse_list, color=color, ax=ax1)
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('RMSE Relativo', color=color)
-    if rmse_r_score.max() - rmse_r_score.min() > 0.25:
-        ax2.set_yscale('log')
-    ax2.plot(hora_list, rmse_r_list, color=color, linewidth=1)
-    sns.scatterplot(x=hora_list, y=rmse_r_list, color=color, ax=ax2)
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    plt.title(f'Comparativa de RMSE y RMSE Relativo por hora para el inversor {inv_id - 20}')
-    plt.xticks(hora_list)
-    plt.tight_layout()
-    ax1.grid(True, which='major', color='gray', linewidth=0.5)
-    ax2.grid(True, which='minor', color='gray', linewidth=0.5)
-    plt.savefig(path + "rmse_hora.png")
-    plt.close("all")
