@@ -11,74 +11,19 @@ import os
 import sys
 from tqdm import tqdm
 warnings.simplefilter(action='ignore', category=FutureWarning)
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestRegressor
-# from sklearn.linear_model import LinearRegression
-from sklearn.multioutput import MultiOutputRegressor
+from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
-from hyperopt import hp, fmin, tpe, STATUS_OK, Trials
+import xgboost as xgb
+from hyperopt import hp, fmin, tpe, STATUS_OK, Trials, space_eval
 from functools import partial
 from sklearn.metrics import mean_squared_error as mse, \
                             mean_absolute_error as mae, \
                             r2_score as r2
-
-
-class degree_scaler(BaseEstimator, TransformerMixin):
-    def __init__(self):
-        self.columns_to_scale_90 = None
-        self.columns_to_scale_180 = None
-        self.columns_to_scale_360 = None
-        
-    def fit(self, X, y = None):
-        self.columns_to_scale_90, self.columns_to_scale_180,  self.columns_to_scale_360 = self.determine_columns_to_scale(X)
-        return self
-    
-    def transform(self, X, y = None):
-        scaled_data = X.copy()
-        if self.columns_to_scale_90 or self.columns_to_scale_180 or self.columns_to_scale_360:  
-            for column in self.columns_to_scale_90:
-                scaled_data[column] = X[column] / 90
-            for column in self.columns_to_scale_180:
-                min_val = X[column].min()
-                if min_val < 0:
-                    scaled_data[column] = (X[column] + 90) / 180
-                else:
-                    scaled_data[column] = X[column] / 180
-            for column in self.columns_to_scale_360:
-                min_val = X[column].min()
-                if min_val < 0:
-                    scaled_data[column] = (X[column] + 180) / 360
-                else:
-                    scaled_data[column] = X[column] / 360
-        return scaled_data
-    
-    def determine_columns_to_scale(self, X):
-        columns_90 = []
-        columns_180 = []
-        columns_360 = []
-        for column in X.columns:
-            min_val = X[column].min()
-            max_val = X[column].max()
-            if (min_val >= 0 and max_val <= 90):
-                columns_90.append(column)
-            elif (min_val >= -90 and max_val <= 90) or (min_val >= 0 and max_val <= 180):
-                columns_180.append(column)
-            elif (min_val >= -180 and max_val <= 180) or (min_val >= 0 and max_val <= 360):
-                columns_360.append(column)
-        return columns_90, columns_180, columns_360
-
-    def get_feature_names_out(self, input_features=None):
-        if input_features is not None:
-            output_features = []
-            for feature in input_features:
-                output_features.append("scaled__" + feature)
-            return output_features
-        else:
-            return None
+from sklearn.base import BaseEstimator, TransformerMixin
+from tqdm import tqdm
 
 def discriminador(x, norm):
 
@@ -97,81 +42,108 @@ def discriminador(x, norm):
     results = results.reset_index(drop=True)
     return results
 
-def objective(space, model_name, train_set, test_set, use_cv = False, device = "cpu"):
-    if model_name == "XGBRegressor" and device == "cuda":
-        model = MultiOutputRegressor(XGBRegressor(device = 'cuda:0',
-                        objective='reg:squarederror', 
-                        tree_method="hist_gpu", 
-                        n_jobs=-1, 
-                        n_estimators =int(space['n_estimators']), 
-                        max_depth = int(space['max_depth']), 
-                        learning_rate = space['learning_rate'],
-                        gamma = space['gamma'],
-                        min_child_weight = space['min_child_weight'],
-                        subsample = space['subsample'],
-                        reg_alpha = space['reg_alpha'],
-                        reg_lambda = space['reg_lambda'],
-                        eval_metric='rmse'
-                        ))
-        if use_cv:
-            dtrain = xgb.DMatrix(train_set[0], label=train_set[1])
-            cv_results = xgb.cv(model.get_params(), dtrain, nfold=5, metrics={"rmse"}, seed=42)
-            loss = cv_results['test-rmse-mean'].iloc[-1]
-        else:
-            model.fit(train_set[0], train_set[1])
-            y_pred = model.predict(test_set[0])
-            loss = mse(test_set[1], y_pred)
+class MultiOutputOpt(BaseEstimator, TransformerMixin):
+    def __init__(self, model_class=XGBRegressor, device="cpu", trials=None):
+        self.model_class = model_class
+        self.device = device
+        self.models = {}  
+        self.trials = trials if trials is not None else {}
+        try:
+            print(len(self.trials[0].trials))
+        except:
+            pass
+        self.params = {}
+        
+    def objective(self, space_params, train_set, cv_folds):
+        params = {'device': self.device,
+            'objective': 'reg:squarederror', 
+            'tree_method': "hist", 
+            'random_state': 42,
+            'n_jobs': -1,
+            'max_depth': int(space_params['max_depth']),
+            'gamma': space_params['gamma'],
+            'learning_rate': space_params['learning_rate'],
+            'min_child_weight': max(1, int(space_params['min_child_weight'])),
+            'subsample': space_params['subsample'],
+            'reg_alpha': space_params['reg_alpha'],
+            'reg_lambda': space_params['reg_lambda'],
+             }
+        cv_result = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = int(space_params["n_estimators"]), early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
+        score = cv_result['test-rmse-mean'].min()
+        return {'loss': score, 'status': STATUS_OK}
 
-    if model_name == "XGBRegressor" and device == "cpu":
-        model = XGBRegressor(device = 'cpu',
-                        objective='reg:squarederror', 
-                        tree_method="hist", 
-                        multi_strategy="multi_output_tree", 
-                        n_jobs=-1, 
-                        n_estimators =int(space['n_estimators']), 
-                        max_depth = int(space['max_depth']), 
-                        learning_rate = space['learning_rate'],
-                        gamma = space['gamma'],
-                        min_child_weight = space['min_child_weight'],
-                        subsample = space['subsample'],
-                        reg_alpha = space['reg_alpha'],
-                        reg_lambda = space['reg_lambda'],
-                        eval_metric='rmse'
-                        )
-        if use_cv:
-            scores = cross_val_score(model, train_set[0], train_set[1], cv=5, scoring='neg_mean_squared_error')
-            loss = -np.mean(scores)
-        else:
-            model.fit(train_set[0], train_set[1])
-            y_pred = model.predict(test_set[0])
-            loss = mse(test_set[1], y_pred)
+    def optimize(self, X, y, space, cv_folds, gamma = 1, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 250):
+        for col in tqdm(range(y.shape[1]), total = y.shape[1]):
+            train_set = xgb.DMatrix(X, label=y[:, col])
+            if col in self.trials:
+                trials = self.trials[col]
+            else:
+                trials = Trials()
+            TOTAL_EVALS = len(trials.trials)
+            STALL_LIMIT = STALL_LIMIT
+            MAX_EVALS_PER_RUN = MAX_EVALS_PER_RUN
+            best_loss = np.inf
+            gamma = gamma
+            stall_counter = 0
+            num_evals = TOTAL_EVALS
+            run_counter = 0
+            upper_limit = (MAX_EVALS_PER_RUN * (STALL_LIMIT - 1)) * 10
+            while stall_counter < STALL_LIMIT and num_evals < TOTAL_EVALS + upper_limit:
+                best = fmin(fn=lambda space: self.objective(space, train_set = train_set, cv_folds = cv_folds), 
+                        space = space, 
+                        algo = partial(tpe.suggest, gamma = gamma),
+                        max_evals = num_evals + MAX_EVALS_PER_RUN, 
+                        trials = trials,
+                        verbose = False)  # Cambiado a True para que devuelva los parámetros óptimos
+                best_params = space_eval(space, best)  # Obtener los parámetros óptimos en su forma original
+                new_loss = trials.best_trial['result']['loss']
+                if new_loss < best_loss:
+                    threshold = 0.001
+                    if abs(new_loss - best_loss) <= threshold:
+                        stall_counter += 1
+                    else:
+                        stall_counter = 0
+                    best_loss = new_loss
+                else:
+                    stall_counter += 1
+                num_evals += MAX_EVALS_PER_RUN
+                run_counter += 1
+            print(f"\tEntrenamiento para entrada {col+1} finalizado")
+            print(f"\tNúmero de evaluaciones realizadas: {num_evals}")
+            print(f"\tBest params: {best_params}")
+            print(f"\tBest loss: {best_loss}")
 
-    elif model_name == "RandomForestRegressor":
-        model = RandomForestRegressor(n_jobs=-1, 
-                                    n_estimators =int(space['n_estimators']), 
-                                    max_depth = int(space['max_depth']), 
-                                    max_features = space['max_features'], 
-                                    min_samples_leaf = int(space['min_samples_leaf']), 
-                                    min_samples_split = int(space['min_samples_split']))
-        if use_cv:
-            scores = cross_val_score(model, train_set[0], train_set[1], cv=5, scoring='neg_mean_squared_error')
-            loss = -np.mean(scores)
-        else:
-            model.fit(train_set[0], train_set[1])
-            y_pred = model.predict(test_set[0])
-            loss = mse(test_set[1], y_pred)
+            params = {"device": self.device,
+                        "objective": 'reg:squarederror', 
+                        "tree_method": "hist",
+                        "n_jobs": -1, 
+                        "gamma": best_params["gamma"],
+                        "learning_rate": best_params["learning_rate"],
+                        "max_depth": int(best_params["max_depth"]),
+                        "min_child_weight": max(1, int(best_params['min_child_weight'])),
+                        "reg_alpha": best_params["reg_alpha"],
+                        "reg_lambda": best_params["reg_lambda"],
+                        "subsample": best_params["subsample"]}
+            model = xgb.train(params, train_set, num_boost_round = int(best_params['n_estimators']))
+            self.models[col] = model
+            self.trials[col] = trials
+            self.params[col] = best_params  # Guardar los parámetros óptimos en su forma original
 
-    else:
-        print("Modelo no reconocido")
-        sys.exit()
+    def predict(self, X):
+        predictions = []
+        dmatrix = xgb.DMatrix(X)
+        for col, model in self.models.items():
+            pred = model.predict(dmatrix)
+            predictions.append(pred)
+        return np.column_stack(predictions)
     
-    return {'loss':loss, 'status': STATUS_OK}
-
-valid_models = {"1": "XGBRegressor", "2": "RandomForestRegressor"}
-model_name = ""
-while model_name not in valid_models.keys():
-    model_name = input("Ingrese el valor numérico para el tipo de modelo que desea utilizar (XGBRegressor[1], RandomForestRegressor[2]): ")
-model_name = valid_models[model_name]
+print("Configuración para el entrenamiento de modelos de predicción de entrada de corriente continua en inversores fotovoltaicos:", end="\n\n")
+# valid_models = {"1": "XGBRegressor", "2": "RandomForestRegressor"}
+# model_name = ""
+# while model_name not in valid_models.keys():
+#     model_name = input("Ingrese el valor numérico para el tipo de modelo que desea utilizar (XGBRegressor[1], RandomForestRegressor[2]): ")
+# model_name = valid_models[model_name]
+model_name = "XGBRegressor"
 
 valid_responses = ["y", "n"]
 normalizacion = ""
@@ -184,13 +156,27 @@ while optimizacion not in valid_responses:
     optimizacion = input("¿Desea optimizar el modelo? (Y/N): ").lower()
 optimizacion = optimizacion == "y"
 
-use_cv = False
-if optimizacion:
-    while use_cv not in valid_responses:
-        use_cv = input("\t¿Desea utilizar validación cruzada? (Y/N): ").lower()
-    use_cv = use_cv == "y"
+use_cv = True
+# if optimizacion:
+#     while use_cv not in valid_responses:
+#         use_cv = input("\t¿Desea utilizar validación cruzada? (Y/N): ").lower()
+#     use_cv = use_cv == "y"
 
-print(f"\nLas opciones seleccionadas son: \nModelo: {model_name} \nNormalización: {normalizacion} \nOptimización: {optimizacion} \nValidación cruzada: {use_cv}", end="\n\n")
+# Comprobación de la disponibilidad de GPU para el entrenamiento
+valid_devices = ["cpu", "cuda"]
+device = ""
+if torch.cuda.is_available() and model_name == "XGBRegressor":
+    while device not in valid_devices:
+        device_bool = input("¿Desea utilizar GPU para el entrenamiento? (Y/N): ").lower()
+        if device_bool == "y":
+            device = "cuda"
+        else:
+            device = "cpu"
+else:
+    device = 'cpu'
+
+
+print(f"\nLas opciones seleccionadas son: \nModelo: {model_name} \nNormalización: {normalizacion} \nOptimización: {optimizacion} \nValidación cruzada: {use_cv} \nEntrenamiento: {device}", end="\n\n")
 
 root_path = os.getcwd()
 params = None
@@ -221,6 +207,7 @@ if schema_name == "galisteo":
                     AND (EXTRACT(MONTH FROM datetime_utc) != 10)
                     AND (alarma = 0)
                     AND (estado = 6)
+                    AND (dispositivo_id = 27)
                 ORDER BY datetime_utc)
         SELECT f.id, f.dispositivo_id, det.entrada_id, f.datetime_utc, potencia_act, lim_act, num_strings, 
                 rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, cloud_impact, 
@@ -248,7 +235,8 @@ elif schema_name == "bonete":
                     WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
                         AND (EXTRACT(SECOND FROM datetime_utc) = 0)
                         AND (alarma = 0)
-                        AND (estado = 6)),
+                        AND (estado = 6)
+                        AND (dispositivo_id = 27)),
                 met AS (
                     SELECT datetime_utc, AVG(rad_poa) AS rad_poa, AVG(rad_hor) AS rad_hor, AVG(rad_celda1) AS rad_celda1,
                             AVG(rad_celda2) AS rad_celda2, AVG(temp_amb) AS temp_amb, AVG(temp_panel1) AS temp_panel1,
@@ -403,184 +391,60 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     X_prep = preprocessor.fit_transform(X)
 
     if optimizacion:
-        # Split de los datos de entrenamiento para optimización de hiperparámetros en caso de no usar validación cruzada
-        if use_cv:
-            print("\tOptimización de hiperparámetros con cross-validation")
-            train_set = [X_prep, y]
-            test_set = [None, None]
-        else:
-            print("\tOptimización de hiperparámetros con validacion sobre conjunto de testeo")
-            X_train, X_test, y_train, y_test = train_test_split(X_prep, y, test_size = 0.2)
-            train_set = [X_train, y_train]
-            test_set = [X_test, y_test]
+        print("\tOptimización con espacio de búsqueda reducido")
+        space = {'max_depth': hp.quniform("max_depth", 3, 15, 3),
+                'n_estimators': hp.quniform('n_estimators', 100, 1500, 200),
+                'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
+                'gamma': hp.quniform ('gamma', 0, 1, 0.2),
+                'min_child_weight' : hp.quniform('min_child_weight', 1, 19, 3),
+                'subsample' : hp.quniform('subsample', 0.5, 1, 0.1),
+                'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 1),
+                'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 1)
+                }
+        multioutput_model = MultiOutputOpt(model_class=XGBRegressor, device=device)
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 3, gamma = 1, STALL_LIMIT = 2, MAX_EVALS_PER_RUN = 2)
 
-        # Comprueba si CUDA está disponible
-        flag = False
-        if torch.cuda.is_available() and model_name == "XGBRegressor" and flag:
-            import cupy as cp
-            device = 'cuda'
-            train_set = [cp.asarray(train_set[0]), cp.asarray(train_set[1].values)]
-            test_set = [cp.asarray(test_set[0]) if test_set[0] is not None else None,
-                        cp.asarray(test_set[1].values) if test_set[1] is not None else None]
-        else:
-            device = 'cpu'
-        # Inicialización  y primera fase de la optimización de hiperparámetros con gamma = 1 y espacio de búsqueda general
-        trials = Trials()
-        best_loss = np.inf
-        gamma = 1
-        stall_counter = 0
-        STALL_LIMIT = 3
-        MAX_EVALS_PER_RUN = 250
-        total_evals = 0
-        run_counter = 0
-        if model_name == "XGBRegressor":
-            space ={
-                'max_depth': hp.quniform("x_max_depth", 3, 15, 3),
-                'n_estimators': hp.quniform('x_n_estimators', 100, 1500, 200),
-                'learning_rate': hp.quniform('x_learning_rate', 0.01, 0.2, 0.01),
-                'gamma': hp.quniform ('x_gamma', 0, 1, 0.2),
-                'min_child_weight' : hp.quniform('x_min_child', 1, 19, 3),
-                'subsample' : hp.quniform('x_subsample', 0.5, 1, 0.1),
-                'reg_alpha' : hp.quniform('x_reg_alpha', 0, 20, 0.5),
-                'reg_lambda' : hp.quniform('x_reg_lambda', 0, 20, 0.5)
-            }
-        elif model_name == "RandomForestRegressor":
-            space = {
-                'max_depth': hp.quniform("x_max_depth", 3, 15, 2),
-                'n_estimators': hp.quniform("x_n_estimators", 100, 1500, 100),
-                'min_samples_split': hp.quniform ('x_min_samples_split', 2, 20, 2),
-                'min_samples_leaf': hp.quniform ('x_min_samples_leaf', 1, 19, 2),
-                'max_features': hp.choice('x_max_features', [None, 'sqrt', 'log2']),     
-            }
-        upper_limit = (MAX_EVALS_PER_RUN/(STALL_LIMIT - 1)) * 10
-        while stall_counter < STALL_LIMIT and total_evals < upper_limit:
-            best = fmin(fn=lambda space: objective(space, model_name = model_name, train_set = train_set, test_set = test_set, use_cv=use_cv), 
-                        space=space, 
-                        algo=partial(tpe.suggest, gamma = gamma),
-                        max_evals=total_evals + MAX_EVALS_PER_RUN, 
-                        trials=trials)
-            
-            new_loss = trials.best_trial['result']['loss']
-            if new_loss < best_loss:
-                threshold = 0.001
-                if abs(new_loss - best_loss) <= threshold:
-                    stall_counter += 1
-                else:
-                    stall_counter = 0
-                best_loss = new_loss
-            else:
-                stall_counter += 1
-
-            total_evals += MAX_EVALS_PER_RUN
-            run_counter += 1
-
-            if total_evals % (MAX_EVALS_PER_RUN/(STALL_LIMIT - 1)) == 0:
-                gamma = max(0, gamma - 0.05)
-            print(f"Run {run_counter}: Best loss so far: {best_loss}")
-
-        print(f"\tMejor combinación de hiperparámetros en la primera búsqueda:\n{best}")
-        # Segunda fase de la optimización de hiperparámetros con gamma = 0.33 y espacio de búsqueda fino
-        stall_counter = 0
-        STALL_LIMIT = 5
-        MAX_EVALS_PER_RUN = 250
-        initial_total_evals = total_evals
-        run_counter = 0
-        if model_name == "XGBRegressor":
-            space ={
-                'max_depth': hp.quniform("x_max_depth", 3, 15, 1),
-                'n_estimators': hp.quniform('x_n_estimators', 100, 1500, 1),
-                'learning_rate': hp.quniform('x_learning_rate', 0.01, 0.2, 0.001),
-                'gamma': hp.quniform ('x_gamma', 0, 1, 0.01),
-                'min_child_weight' : hp.quniform('x_min_child', 1, 20, 1),
-                'subsample' : hp.quniform('x_subsample', 0.5, 1, 0.05),
-                'reg_alpha' : hp.quniform('x_reg_alpha', 0, 10, 0.01),
-                'reg_lambda' : hp.quniform('x_reg_lambda', 0, 10, 0.01)
-            }
-        elif model_name == "RandomForestRegressor":
-            space = {
-                'max_depth': hp.quniform("x_max_depth", 3, 15, 1),
-                'n_estimators': hp.quniform("x_n_estimators", 100, 1500, 10),
-                'min_samples_split': hp.quniform ('x_min_samples_split', 2, 21, 1),
-                'min_samples_leaf': hp.quniform ('x_min_samples_leaf', 1, 20, 1),
-                'max_features': hp.choice('x_max_features', ['auto', 'sqrt', 'log2']),     
-            }
-        while stall_counter < STALL_LIMIT and total_evals < initial_total_evals + 10000:
-            best = fmin(fn=lambda space: objective(space, model_name = model_name, train_set = train_set, test_set = test_set, use_cv=use_cv), 
-                        space=space, 
-                        algo=partial(tpe.suggest, gamma=0.33), 
-                        max_evals=total_evals + MAX_EVALS_PER_RUN, 
-                        trials=trials)
-            
-            new_loss = trials.best_trial['result']['loss']
-            if new_loss < best_loss:
-                best_loss = new_loss
-                stall_counter = 0
-            else:
-                stall_counter += 1
-
-            total_evals += MAX_EVALS_PER_RUN
-            run_counter += 1
-            print(f"Run {run_counter}: Best loss so far: {best_loss}")
-
-        print(f"\tMejor combinación de hiperparámetros:\n{best}")
+        print("\n\tOptimización con espacio de búsqueda detallado")
+        space = {'max_depth': hp.quniform("max_depth", 3, 15, 1),
+                'n_estimators': hp.quniform('n_estimators', 100, 1500, 25),
+                'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
+                'gamma': hp.quniform ('gamma', 0, 1, 0.01),
+                'min_child_weight' : hp.quniform('min_child_weight', 1, 20, 1),
+                'subsample' : hp.quniform('subsample', 0.5, 1, 0.05),
+                'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 0.1),
+                'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 0.1)
+                }
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 3, gamma = 0.33, STALL_LIMIT = 2, MAX_EVALS_PER_RUN = 2)
     
-        # Entrenamiento del modelo con los mejores hiperparámetros
-        if model_name == "XGBRegressor" and device == "cuda":
-            model = MultiOutputRegressor(XGBRegressor(device = 'cuda:0',
-                        objective='reg:squarederror', 
-                        tree_method="hist_gpu", 
-                        n_jobs=-1, 
-                        gamma = best["x_gamma"],
-                        learning_rate = best["x_learning_rate"],
-                        max_depth = int(best["x_max_depth"]),
-                        min_child_weight = int(best["x_min_child"]),
-                        n_estimators = int(best["x_n_estimators"]),
-                        reg_alpha = best["x_reg_alpha"],
-                        reg_lambda = best["x_reg_lambda"],
-                        subsample = best["x_subsample"]))
-        elif model_name == "XGBRegressor" and device == "cpu":
-            model = XGBRegressor(device = 'cpu',
-                        objective='reg:squarederror', 
-                        tree_method="hist", 
-                        multi_strategy="multi_output_tree", 
-                        n_jobs=-1, 
-                        gamma = best["x_gamma"],
-                        learning_rate = best["x_learning_rate"],
-                        max_depth = int(best["x_max_depth"]),
-                        min_child_weight = int(best["x_min_child"]),
-                        n_estimators = int(best["x_n_estimators"]),
-                        reg_alpha = best["x_reg_alpha"],
-                        reg_lambda = best["x_reg_lambda"],
-                        subsample = best["x_subsample"])
-            
-        elif model_name == "RandomForestRegressor":
-            model = RandomForestRegressor(n_jobs=-1, 
-                                            n_estimators = int(best["x_n_estimators"]), 
-                                            max_depth = int(best["x_max_depth"]), 
-                                            max_features = best["x_max_features"], 
-                                            min_samples_leaf = int(best["x_min_samples_leaf"]), 
-                                            min_samples_split = int(best["x_min_samples_split"]))
-        model.fit(X_prep, y)
     else:
         if model_name == "XGBRegressor":
-            model = XGBRegressor(objective='reg:squarederror', 
-                                    tree_method="hist", 
-                                    multi_strategy="multi_output_tree", 
-                                    n_jobs=-1)
-        elif model_name == "RandomForestRegressor":
-            model = RandomForestRegressor(n_jobs=-1)
-        model.fit(X_prep, y)
+            dtrain = xgb.DMatrix(X_prep, label=y)
+            params = {
+                'objective': 'reg:squarederror',
+                'tree_method': "hist",
+                'multi_strategy': "multi_output_tree",
+                'random_state': 42,
+                'n_jobs': -1
+            }
+            multioutput_model = xgb.train(params, dtrain) 
+
+        else:
+            print("Modelo no reconocido")
+            sys.exit()
 
     pipeline_model = Pipeline([('preprocessor', preprocessor),
-                            ('regressor', model)])
-    
-    # Evaluación del modelo sobre conjunto de validación
+                            ('regressor', multioutput_model)])
+
     consulta_sql = f"""SELECT num_strings
                     FROM {schema_name}.distrib_inversores
                     WHERE dispositivo_id = {inv_id};"""
     num_strings = pd.read_sql_query(consulta_sql, engine).values.reshape(1, -1)
 
-    y_pred_val = pd.DataFrame(pipeline_model.predict(X_val)).rename(columns={i: "y_pred_"+str(i+1) for i in pd.DataFrame(pipeline_model.predict(X_val)).columns})
+    if optimizacion:
+        X_val_prep = pipeline_model.named_steps['preprocessor'].transform(X_val)
+    else:
+        X_val_prep = xgb.DMatrix(pipeline_model.named_steps['preprocessor'].transform(X_val))
+    y_pred_val = pd.DataFrame(pipeline_model.named_steps['regressor'].predict(X_val_prep)).rename(columns={i: "y_pred_"+str(i+1) for i in pd.DataFrame(pipeline_model.named_steps['regressor'].predict(X_val_prep)).columns})
     if normalizacion:
         y_pred_val = y_pred_val * num_strings
         y_val_reesc = y_val * num_strings
@@ -606,19 +470,28 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
 
     # Guardado del modelo y de las métricas
     algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
+    # columnas = [col_name.split("__")[1] for col_name in preprocessor.get_feature_names_out()]
+    # importance_scores = model.get_score(importance_type='gain')
+    # total_gain = np.array([v for k,v in importance_scores.items()]).sum()
+    # importancia = {k: v/total_gain for k, v in importance_scores.items()}
     path = os.path.join(root_path, f"Modelos/entrada_amperaje_multi/Inversor_{inv_id - 20}/Repositorio/{algoritmo}-{pd.Timestamp.now()}/")
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
         pickle.dump(pipeline_model, archivo_salida)
     with open(path+'informe_modelo.json', 'w') as archivo_json:
         informe = {"normalizacion": normalizacion,
-                   "optimizacion": optimizacion,
-                   "cross_validation": use_cv,
+                    "optimizacion": optimizacion,
+                    "cross_validation": use_cv,
                     "metricas": metricas,
-                    "hiperparametros": {k:v for k,v in pipeline_model.named_steps["regressor"].get_params().items() if v != None},
-                    "input_description": processed_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
-                    "target": (y * num_strings).reset_index().melt(id_vars=["datetime_utc", "dispositivo_id"], var_name="entrada_id", value_name="amp_dc")[["amp_dc"]].describe().to_dict()}
+                    # "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
+                    "validation_range": {"start": validation_df["datetime_utc"].min().strftime("%Y-%m-%d %H:%M:%S"), 
+                                            "end": validation_df["datetime_utc"].max().strftime("%Y-%m-%d %H:%M:%S")},
+                    # "hiperparametros": {k:v for k,v in params.items() if v != None},
+                    "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
+                    "training_target_description": (train_df["amp_dc"] * train_df["num_strings"]).describe().to_dict(),
+                    }
         json.dump(informe, archivo_json)
+
 
     # Generación de gráficos: comparativa de valores reales y predichos, histograma de diferencias y matriz de correlación
     y_test_sampled, _,y_pred_sampled, _ = train_test_split(prediction_df["amp_dc"], prediction_df["y_pred"], train_size = 0.25)
@@ -669,20 +542,20 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     sns.scatterplot(x=entrada_list, y=rmse_list, color=color, ax=ax1)
     ax1.tick_params(axis='y', labelcolor=color)
 
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('RMSE Relativo', color=color)
-    if rmse_r_score.max() - rmse_r_score.min() > 0.25:
-        ax2.set_yscale('log')
-    ax2.plot(entrada_list, rmse_r_list, color=color, linewidth=1)
-    sns.scatterplot(x=entrada_list, y=rmse_r_list, color=color, ax=ax2)
-    ax2.tick_params(axis='y', labelcolor=color)
+    # ax2 = ax1.twinx()
+    # color = 'tab:red'
+    # ax2.set_ylabel('RMSE Relativo', color=color)
+    # if rmse_r_score.max() - rmse_r_score.min() > 0.25:
+    #     ax2.set_yscale('log')
+    # ax2.plot(entrada_list, rmse_r_list, color=color, linewidth=1)
+    # sns.scatterplot(x=entrada_list, y=rmse_r_list, color=color, ax=ax2)
+    # ax2.tick_params(axis='y', labelcolor=color)
 
-    plt.title(f'Comparativa de RMSE y RMSE Relativo por entrada para el inversor {inv_id - 20}')
+    plt.title(f'RMSE por entrada para el inversor {inv_id - 20}')
     plt.xticks(entrada_list)
     plt.tight_layout()
     ax1.grid(True, which='major', color='gray', linewidth=0.5)
-    ax2.grid(True, which='minor', color='gray', linewidth=0.5)
+    #ax2.grid(True, which='minor', color='gray', linewidth=0.5)
     plt.savefig(path + "rmse_entrada.png")
 
     # Generación de gráficos: comparativa de RMSE y RMSE relativo por hora

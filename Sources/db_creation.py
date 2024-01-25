@@ -111,6 +111,46 @@ if __name__ == "__main__":
                     -1.311788903978612);""")
             except psycopg2.errors.UniqueViolation:
                 pass
+        elif schema_name == "alcazar":
+            try:
+                cur.execute(
+                    f"""INSERT INTO {schema_name}.parques VALUES(
+                    1, 
+                    'Alcazar_1',
+                    'Ciudad Real',
+                    0,
+                    0,
+                    39.347029,
+                    -3.318184),
+                    (2, 
+                    'Alcazar_2',
+                    'Ciudad Real',
+                    0,
+                    0,
+                    39.347029,
+                    -3.318184),
+                    (3, 
+                    'Alcazar_3',
+                    'Ciudad Real',
+                    0,
+                    0,
+                    39.347029,
+                    -3.318184);""")
+            except psycopg2.errors.UniqueViolation:
+                pass
+        elif schema_name == "manzanares":
+            try:
+                cur.execute(
+                    f"""INSERT INTO {schema_name}.parques VALUES(
+                    1, 
+                    'Manzanares',
+                    'Castilla-La Mancha',
+                    0,
+                    0,
+                    39.094280,
+                    -3.301643);""")
+            except psycopg2.errors.UniqueViolation:
+                pass
         
         ########################################
         # CREACIÓN TABLA PARA LOS DISPOSITIVOS #
@@ -141,8 +181,7 @@ if __name__ == "__main__":
                 potencia_mod VARCHAR(10),
                 potencia INTEGER,
                 PRIMARY KEY (dispositivo_id, entrada_id),
-                FOREIGN KEY (parque_id) REFERENCES {schema_name}.parques(parque_id),
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id));""")
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id));""")
         
         ##############################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS EN BRUTO DE LOS INVERSORES #
@@ -206,7 +245,7 @@ if __name__ == "__main__":
                 energia_dia INTEGER,
                 procesado BOOLEAN DEFAULT FALSE,
                 datetime_procesado TIMESTAMP WITH TIME ZONE,
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ################################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS PROCESADAS DE LOS INVERSORES #
@@ -214,6 +253,7 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.inversores(
                 id INTEGER PRIMARY KEY,
+                parque_id SMALLINT,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 med_id INTEGER,
@@ -235,8 +275,8 @@ if __name__ == "__main__":
                 vol_dc_bus REAL,
                 aisl_dc INTEGER,
                 energia_dia INTEGER,
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id),
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ###################################################################
         # CREACIÓN TABLA PARA EL DETALLE DE LAS MEDIDAS DE LOS INVERSORES #
@@ -283,9 +323,10 @@ if __name__ == "__main__":
                 vel_viento REAL, 
                 dir_viento REAL, 
                 hum_rel REAL,
+                presion_atm REAL,
                 procesado BOOLEAN DEFAULT FALSE,
                 datetime_procesado TIMESTAMP WITH TIME ZONE,
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         #######################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS PROCESADAS DE METEO #
@@ -293,6 +334,7 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.meteo(
                 id INTEGER PRIMARY KEY,
+                parque_id SMALLINT,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 med_id INTEGER,
@@ -312,7 +354,7 @@ if __name__ == "__main__":
                 azimuth REAL,
                 cloud_impact REAL,
                 daylight BOOLEAN,
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id,dispositivo_id),
                 UNIQUE(datetime_utc, dispositivo_id));""")
         
         ##################################################################
@@ -347,7 +389,7 @@ if __name__ == "__main__":
                 frec REAL,
                 procesado BOOLEAN DEFAULT false,
                 datetime_procesado TIMESTAMP WITH TIME ZONE,
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ####################################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS PROCESADAS DEL ANALIZADOR DE RED #
@@ -355,6 +397,7 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.analizador_red(
                 id INTEGER PRIMARY KEY,
+                parque_id SMALLINT,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 med_id INTEGER,
@@ -370,7 +413,7 @@ if __name__ == "__main__":
                 amp_2 REAL,
                 amp_3 REAL,
                 frec REAL,
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, dispositivo_id));""")
         
         #########################################################
@@ -400,7 +443,7 @@ if __name__ == "__main__":
                 energia_rea_q4 REAL,
                 procesado BOOLEAN DEFAULT false,
                 datetime_procesado TIMESTAMP WITH TIME ZONE,
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ###########################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS PROCESADAS DEL CONTADOR #
@@ -408,6 +451,7 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.contador(
                 id INTEGER PRIMARY KEY,
+                parque_id SMALLINT,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 med_id INTEGER,
@@ -418,7 +462,7 @@ if __name__ == "__main__":
                 energia_rea_q2 REAL,
                 energia_rea_q3 REAL,
                 energia_rea_q4 REAL,
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, dispositivo_id));""")
         
         ###################################################
@@ -448,7 +492,7 @@ if __name__ == "__main__":
                 consigna_fdp_planta REAL,
                 procesado BOOLEAN DEFAULT false,
                 datetime_procesado TIMESTAMP WITH TIME ZONE,
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ######################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS PROCESADAS DEL REE #
@@ -456,6 +500,7 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.ree(
                 id INTEGER PRIMARY KEY,
+                parque_id SMALLINT,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 med_id INTEGER,
@@ -466,7 +511,7 @@ if __name__ == "__main__":
                 consigna_pot_act_planta REAL,
                 consigna_fdp_ree REAL,
                 consigna_fdp_planta REAL,
-                FOREIGN KEY (dispositivo_id) REFERENCES {schema_name}.dispositivos(dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, dispositivo_id));""")
 
         ################################
