@@ -55,13 +55,15 @@ if __name__ == "__main__":
         inv_df = inv_df.drop(columns = ["procesado", "datetime_procesado"])
             
         # Comprobación si el id del dispositivo está ya registrado y registro en caso de no ser así
-        for id in inv_df["dispositivo_id"].unique():
-            id_int = int(id)
-            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE dispositivo_id = %s;""", (id_int,))
+        for pair in inv_df[["parque_id", "dispositivo_id"]].drop_duplicates().values:
+            id_par = int(pair[0])
+            id_inv = int(pair[1])
+            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE parque_id = {id_par} AND dispositivo_id = {id_inv};""")
             resultados = cur.fetchall()
             if not resultados:
                 print("Generando entradas de nuevos dispositivos")
-                dispositivo = inv_df[(inv_df["dispositivo_id"] == id_int)][["parque_id", 
+                dispositivo = inv_df[(inv_df["parque_id"] == id_par) & 
+                                    (inv_df["dispositivo_id"] == id_inv)][["parque_id", 
                                                                             "dispositivo_id", 
                                                                             "nombre_dispositivo", 
                                                                             "ref", 
@@ -74,8 +76,7 @@ if __name__ == "__main__":
             conn.commit()
         
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
-        inv_df.drop(columns = ["parque_id",
-                            "descripcion_parque", 
+        inv_df.drop(columns = ["descripcion_parque", 
                             "localizacion_parque",
                             "potencia_max", 
                             "num_paneles"], inplace = True)
@@ -99,6 +100,7 @@ if __name__ == "__main__":
         try:
             dtypes_inv = {
                 'id': sqlalchemy.types.INTEGER(),
+                'parque_id': sqlalchemy.types.SMALLINT(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),

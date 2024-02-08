@@ -158,12 +158,13 @@ if __name__ == "__main__":
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.dispositivos(
                 parque_id SMALLINT,
-                dispositivo_id SMALLINT PRIMARY KEY,
+                dispositivo_id SMALLINT,
                 nombre VARCHAR(25),
                 referencia VARCHAR(25),
                 ubicacion VARCHAR(25),
                 descripcion VARCHAR(25),
                 meteo_cercana_id SMALLINT,
+                PRIMARY KEY (dispositivo_id, parque_id),
                 FOREIGN KEY (parque_id) REFERENCES {schema_name}.parques(parque_id));""")
         
         ######################################################################
@@ -180,7 +181,7 @@ if __name__ == "__main__":
                 num_modulos SMALLINT,
                 potencia_mod VARCHAR(10),
                 potencia INTEGER,
-                PRIMARY KEY (dispositivo_id, entrada_id),
+                PRIMARY KEY (parque_id, dispositivo_id, entrada_id),
                 FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id));""")
         
         ##############################################################
@@ -354,8 +355,8 @@ if __name__ == "__main__":
                 azimuth REAL,
                 cloud_impact REAL,
                 daylight BOOLEAN,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id,dispositivo_id),
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ##################################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS EN BRUTO DEL ANALIZADOR DE RED #
@@ -414,7 +415,7 @@ if __name__ == "__main__":
                 amp_3 REAL,
                 frec REAL,
                 FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         #########################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS EN BRUTO DEL CONTADOR #
@@ -463,7 +464,7 @@ if __name__ == "__main__":
                 energia_rea_q3 REAL,
                 energia_rea_q4 REAL,
                 FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ###################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS EN BRUTO DE REE #
@@ -512,7 +513,7 @@ if __name__ == "__main__":
                 consigna_fdp_ree REAL,
                 consigna_fdp_planta REAL,
                 FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
-                UNIQUE(datetime_utc, dispositivo_id));""")
+                UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
 
         ################################
         # CREACIÓN TABLA PARA DAYLIGHT #
@@ -529,18 +530,17 @@ if __name__ == "__main__":
         ###############################################
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.pred_entrada_corriente(
-                id SERIAL PRIMARY KEY,
-                med_id INTEGER,
+                id INTEGER NOT NULL,
                 dispositivo_id SMALLINT NOT NULL,
                 entrada_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 y_pred REAL,
+                PRIMARY KEY (id, entrada_id),
                 FOREIGN KEY (id) REFERENCES {schema_name}.inversores(id));""")
         
         cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {schema_name}.pred_salida_potencia(
-                id SERIAL PRIMARY KEY,
-                med_id INTEGER,
+                id INTEGER PRIMARY KEY,
                 dispositivo_id SMALLINT NOT NULL,
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 y_pred REAL,

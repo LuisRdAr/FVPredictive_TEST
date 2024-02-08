@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
     # Asignación de identificadores a los dispositivos y parque
     inv_df["parque_id"] = inv_df["disp_name"].str[3]
-    inv_df["dispositivo_id"] = inv_df.groupby("parque_id")["disp_name"].transform(lambda x: x.astype("category").cat.codes + 41)
+    inv_df["dispositivo_id"] = inv_df.groupby("parque_id")["disp_name"].transform(lambda x: x.astype("category").cat.codes + 21)
     inv_df.drop("disp_name", axis=1, inplace=True)
     inv_df["parque_id"] = inv_df["parque_id"].astype('uint8')
     inv_df["dispositivo_id"] = inv_df["dispositivo_id"].astype('uint8')

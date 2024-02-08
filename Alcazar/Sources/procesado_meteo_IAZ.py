@@ -77,7 +77,7 @@ if __name__ == "__main__":
                                     descripcion_dispositivo, datetime_utc AT TIME ZONE 'UTC+0' AS datetime_utc, 
                                     med_id, status, alarma, rad_poa, rad_hor, rad_celda1, rad_celda2,
                                     temp_amb, temp_panel1, temp_panel2, vel_viento, dir_viento,
-                                    hum_rel, procesado, datetime_procesado, 
+                                    hum_rel, presion_atm, procesado, datetime_procesado, 
                                     date AT TIME ZONE 'UTC+0' AS date, sunrise,
                                     sunset 
                             FROM {schema_name}.meteo_raw AS met 
@@ -91,13 +91,15 @@ if __name__ == "__main__":
         meteo_df["datetime_utc"] = pd.to_datetime(meteo_df["datetime_utc"], utc = True)
 
         # Comprobación si el id del dispositivo está ya registrado y registro en caso de no ser así
-        for id in meteo_df["dispositivo_id"].unique():
-            id_int = int(id)
-            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE dispositivo_id = %s;""", (id_int,))
+        for pair in meteo_df[["parque_id", "dispositivo_id"]].drop_duplicates().values:
+            id_par = int(pair[0])
+            id_dis = int(pair[1])
+            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE parque_id = {id_par} AND dispositivo_id = {id_dis};""")
             resultados = cur.fetchall()
             if not resultados:
                 print("Generando entradas de nuevos dispositivos")
-                dispositivo = meteo_df[(meteo_df["dispositivo_id"] == id_int)][["parque_id", 
+                dispositivo = meteo_df[(meteo_df["parque_id"] == id_par) & 
+                                    (meteo_df["dispositivo_id"] == id_dis)][["parque_id", 
                                                                             "dispositivo_id", 
                                                                             "nombre_dispositivo", 
                                                                             "ref", 
@@ -111,16 +113,15 @@ if __name__ == "__main__":
         
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
         meteo_df.drop(columns = ["nombre_dispositivo", 
-                                 "ref", 
-                                 "descripcion_dispositivo", 
-                                 "ubicacion"], inplace = True)
+                                "ref", 
+                                "descripcion_dispositivo", 
+                                "ubicacion"], inplace = True)
         
         # Descarte de valores anómalos basándose en la regla de IQR con parámetro 1.5
         # Se calculan los percentiles 25 y 75 con SQL para cada parámetro y se descartan los registros
         # que se encuentren fuera del rango superior (criterio natural para límite inferior)
-        rad_df = meteo_df[(meteo_df["dispositivo_id"] >= 40) & (meteo_df["dispositivo_id"] < 50)].copy()
-        lista_attr = ["rad_poa", "rad_hor", "rad_celda1", "rad_celda2", 
-                    "temp_amb", "temp_panel1", "temp_panel2", "vel_viento", "dir_viento", "hum_rel"]
+        lista_attr = ["rad_poa", "rad_hor", "rad_celda1", "rad_celda2", "temp_amb", "temp_panel1", 
+                    "temp_panel2", "vel_viento", "dir_viento", "hum_rel", "presion_atm"]
         metrics = pd.DataFrame()
         for column in lista_attr:
             consulta_sql = f"""SELECT percentile_cont(0.25) WITHIN GROUP(ORDER BY {column}) AS percentile_25,
@@ -128,78 +129,54 @@ if __name__ == "__main__":
                                     FROM {schema_name}.meteo_raw AS m
                                     JOIN {schema_name}.daylight AS d
                                         ON m.datetime_utc::DATE = d.date
-                                    WHERE m.datetime_utc BETWEEN d.sunrise AND d.sunset AND
-                                        (m.dispositivo_id = 41 OR m.dispositivo_id = 42 OR m.dispositivo_id = 43) AND
-                                        (m.vel_viento != 'NaN' AND m.dir_viento != 'NaN' AND m.hum_rel != 'NaN');"""
+                                    WHERE m.datetime_utc BETWEEN d.sunrise AND d.sunset;"""
 
             metrics = pd.concat([metrics,pd.read_sql_query(consulta_sql, engine)])
         metrics["column"] = lista_attr
         metrics["upper_lim"] = metrics["percentile_75"] + 1.5 * (metrics["percentile_75"] - metrics["percentile_25"])
+        metrics["lower_lim"] = metrics["percentile_25"] - 1.5 * (metrics["percentile_75"] - metrics["percentile_25"])
 
-        clean_rad_df = rad_df[(rad_df["rad_poa"] >= 0) & (rad_df["rad_poa"] <= metrics[metrics["column"] == "rad_poa"]["upper_lim"].values[0]) &
-                        (rad_df["rad_hor"] >= 0) & (rad_df["rad_hor"] <= metrics[metrics["column"] == "rad_hor"]["upper_lim"].values[0]) &
-                        (rad_df["rad_celda1"] >= 0) & (rad_df["rad_celda1"] <= metrics[metrics["column"] == "rad_celda1"]["upper_lim"].values[0]) &
-                        (rad_df["rad_celda2"] >= 0) & (rad_df["rad_celda2"] <= metrics[metrics["column"] == "rad_celda2"]["upper_lim"].values[0]) &
-                        (rad_df["temp_amb"] >= -273.15) & (rad_df["temp_amb"] <= metrics[metrics["column"] == "temp_amb"]["upper_lim"].values[0]) &
-                        (rad_df["temp_panel1"] >= -273.15) & (rad_df["temp_panel1"] <= metrics[metrics["column"] == "temp_panel1"]["upper_lim"].values[0]) &
-                        (rad_df["temp_panel2"] >= -273.15) & (rad_df["temp_panel2"] <= metrics[metrics["column"] == "temp_panel2"]["upper_lim"].values[0])]
-        outliers_iqr += rad_df.shape[0] - clean_rad_df.shape[0]
+        clean_meteo_df = meteo_df[(meteo_df["rad_poa"] >= 0) & (meteo_df["rad_poa"] <= metrics[metrics["column"] == "rad_poa"]["upper_lim"].values[0]) &
+                        (meteo_df["rad_hor"] >= 0) & (meteo_df["rad_hor"] <= metrics[metrics["column"] == "rad_hor"]["upper_lim"].values[0]) &
+                        (meteo_df["rad_celda1"] >= 0) & (meteo_df["rad_celda1"] <= metrics[metrics["column"] == "rad_celda1"]["upper_lim"].values[0]) &
+                        (meteo_df["rad_celda2"] >= 0) & (meteo_df["rad_celda2"] <= metrics[metrics["column"] == "rad_celda2"]["upper_lim"].values[0]) &
+                        (meteo_df["temp_amb"] >= -273.15) & (meteo_df["temp_amb"] <= metrics[metrics["column"] == "temp_amb"]["upper_lim"].values[0]) &
+                        (meteo_df["temp_panel1"] >= -273.15) & (meteo_df["temp_panel1"] <= metrics[metrics["column"] == "temp_panel1"]["upper_lim"].values[0]) &
+                        (meteo_df["temp_panel2"] >= -273.15) & (meteo_df["temp_panel2"] <= metrics[metrics["column"] == "temp_panel2"]["upper_lim"].values[0]) &
+                        (meteo_df["vel_viento"] >= 0) & (meteo_df["vel_viento"] <= 150) &
+                        (meteo_df["dir_viento"] >= 0) & (meteo_df["dir_viento"] <= 360) &
+                        (meteo_df["hum_rel"] >= 0) & (meteo_df["hum_rel"] <= 100)]
+        
+        # Obtención de los instantes en los que las medidas de presion_atm del dispositivo 41 se encuentren fuera del rango IQR
+        outliers_presion_dt = clean_meteo_df[(clean_meteo_df["dispositivo_id"] == 41) & 
+                            ((clean_meteo_df["presion_atm"] <= metrics[metrics["column"] == "presion_atm"]["lower_lim"].values[0]) |
+                                (clean_meteo_df["presion_atm"] >= metrics[metrics["column"] == "presion_atm"]["upper_lim"].values[0]))]["datetime_utc"].values
 
-        # Descarte de registros donde los instrumentos no funcionasen bien  <-- PENDIENTE DE REVISIÓN
-        # Se descartan los registros donde el comportamiento medio de los sensores no supere un umbral
-        agg_df = clean_rad_df.groupby(["dispositivo_id", "date"])[["rad_poa", 
-                                                            "rad_hor", 
-                                                            "rad_celda1", 
-                                                            "rad_celda2", 
-                                                            "temp_amb", 
-                                                            "temp_panel1", 
-                                                            "temp_panel2"]].agg({"rad_poa": "mean", 
-                                                                                    "rad_hor": "mean",
-                                                                                    "rad_celda1": "mean",
-                                                                                    "rad_celda2": "mean",
-                                                                                    "temp_amb": "mean",
-                                                                                    "temp_panel1": "mean",
-                                                                                    "temp_panel2": "mean"}).reset_index()
-        agg_df = agg_df[(agg_df["rad_poa"] > 50) & 
-                        (agg_df["rad_hor"] > 50) &
-                        (agg_df["rad_celda1"] > 50) &
-                        (agg_df["rad_celda2"] > 50) &
-                        (agg_df["temp_amb"] > 0) &
-                        (agg_df["temp_panel1"] > 0) &
-                        (agg_df["temp_panel2"] > 0)][["dispositivo_id", "date"]]
-        num_rows = clean_rad_df.shape[0]
-        clean_rad_df = pd.merge(agg_df[["dispositivo_id", "date"]], clean_rad_df, left_on=["dispositivo_id", "date"], right_on=["dispositivo_id", "date"], how="inner")
-        outliers_off += num_rows - clean_rad_df.shape[0]
-        # Compleción de los registros relativos al viento y humedad (solo una estación registra los datos en Galisteo, 
-        # y los anemómetros se encuentran separados de las estaciones en Bonete)
-        if schema_name.lower() == "galisteo":
-            # Se separan los registros de la estación que mide la humedad y viento y se descartan los registros fuera del rango natural
-            hum_df = clean_rad_df[clean_rad_df["dispositivo_id"] == 42][["datetime_utc","hum_rel", "vel_viento", "dir_viento"]]
-            outliers_iqr += hum_df[(hum_df["vel_viento"] < 0) | (hum_df["vel_viento"] > 100) |
-                        (hum_df["dir_viento"] < 0) | (hum_df["dir_viento"] > 360) |
-                        (hum_df["hum_rel"] >0) | (hum_df["hum_rel"] > 100)].shape[0]
-            hum_df = hum_df[(hum_df["vel_viento"] >= 0) & (hum_df["vel_viento"] <= 100) &
-                            (hum_df["dir_viento"] >= 0) & (hum_df["dir_viento"] <= 360) &
-                            (hum_df["hum_rel"] >= 0) & (hum_df["hum_rel"] <= 100)]
-            # Se asignan los valores de humedad y viento al resto de registros mediante un left merge debido a la GRAN cantidad de valores nulos en hum_rel
-            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["hum_rel", "vel_viento", "dir_viento"]), hum_df, on="datetime_utc", how = "left")
+        # Obtener el valor medio de presion_atm y hum_rel para los registros con dispositivo_id igual a 42 y 43 para instantes dados
+        # en los que las medidas de presion_atm del dispositivo 41 se encuentren fuera del rango IQR
+        df_42_43 = clean_meteo_df[(clean_meteo_df["dispositivo_id"] != 41) & (clean_meteo_df["datetime_utc"].isin(outliers_presion_dt))][["datetime_utc", "hum_rel", "presion_atm"]]
+        df_42_43_grouped = df_42_43.groupby(["datetime_utc"]).mean().reset_index()
 
-        elif schema_name.lower() == "bonete":  
-            # Se separan los registros de la estación que mide la humedad y los registros de viento y se descartan los registros fuera del rango natural
-            hum_df = meteo_df[meteo_df["dispositivo_id"] == 41][["datetime_utc","hum_rel"]]
-            hum_df = hum_df[(hum_df["hum_rel"] >= 0) & (hum_df["hum_rel"] <= 100)]
-            ane_df = meteo_df[((meteo_df["dispositivo_id"] >= 50) & (meteo_df["dispositivo_id"] < 60)) | 
-                                    (meteo_df["dispositivo_id"] == 41)].copy()
-            clean_ane_df = ane_df[(ane_df["vel_viento"] >= 0) & (ane_df["vel_viento"] <= 100) &
-                                  (ane_df["dir_viento"] >= 0) & (ane_df["dir_viento"] <= 360)]
-            clean_ane_df = clean_ane_df.dropna(subset=["vel_viento", "dir_viento"])
-            # Se calculan los valores medios de viento y dirección para cada instante 
-            ane_agg_df = clean_ane_df[["datetime_utc", "vel_viento", "dir_viento"]].groupby("datetime_utc").mean().reset_index()
-            # Se asignan los valores de humedad y viento al resto de registros mediante un merge
-            num_rows = clean_rad_df.shape[0]
-            clean_rad_df = pd.merge(clean_rad_df.drop(columns=["hum_rel"]), hum_df, on="datetime_utc", how = "inner")
-            clean_meteo_df = pd.merge(clean_rad_df.drop(columns=["vel_viento", "dir_viento"]), ane_agg_df, on="datetime_utc", how = "inner")
-            outliers_iqr += num_rows - clean_meteo_df.shape[0]
+        # Asignar el valor medio a los registros medidos por los dispositivos 42 y 43 en los instantes donde el dispositivo 41 no funcione correctamente
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 41), "presion_atm"] = df_42_43_grouped["presion_atm"]
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 41), "hum_rel"] = df_42_43_grouped["hum_rel"]       
+                
+        # Proceso análogo para los registros con dispositivo_id igual a 42 y 43
+        outliers_presion_dt = clean_meteo_df[(clean_meteo_df["dispositivo_id"] != 41) & 
+                            ((clean_meteo_df["presion_atm"] <= metrics[metrics["column"] == "presion_atm"]["lower_lim"].values[0]) |
+                                (clean_meteo_df["presion_atm"] >= metrics[metrics["column"] == "presion_atm"]["upper_lim"].values[0]))]["datetime_utc"].unique().tolist()
+        df_41 = clean_meteo_df[(clean_meteo_df["dispositivo_id"] == 41) & (clean_meteo_df["datetime_utc"].isin(outliers_presion_dt))][["datetime_utc", "hum_rel", "presion_atm"]]
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 42), "presion_atm"] = df_41["presion_atm"]
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 42), "hum_rel"] = df_41["hum_rel"]       
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 43), "presion_atm"] = df_41["presion_atm"]
+        clean_meteo_df.loc[(clean_meteo_df["datetime_utc"].isin(outliers_presion_dt)) & (clean_meteo_df["dispositivo_id"] == 43), "hum_rel"] = df_41["hum_rel"]       
+        
+        ##########
+        # INTENTAR GENERALIZAR ESTE PROCESO PARA VARIAS COLUMNAS. LAS TEMPERATURAS PRESENTAN UN COMPORTAMIENTO ANÁLOGO
+        # (SE PUEDE COMPROBAR AGRUPANDO POR HORAS Y DISPOSITIVOS Y POSTERIORMENTE POR HORAS Y MIRAS LA STD)
+        ##########
+
+        outliers_iqr += meteo_df.shape[0] - clean_meteo_df.shape[0]
 
         # Cálculo de la elevación y azimuth para los instantes dados
         solar_position = parque.get_solarposition(pd.date_range(start = clean_meteo_df["datetime_utc"].min(), 
@@ -248,56 +225,11 @@ if __name__ == "__main__":
                 ratio.append(100)
         clean_meteo_df["cloud_impact"] = ratio
 
-        # # Filtrado de outliers siguiendo el criterio de las desviaciones estandar. Agrupación 
-        # # de rangos normales por daylight y mes del año.
-        # outlier_entrada = []
-        # std_param_t = 3
-        # std_param_f = 6
-        # lista_attr = ["rad_poa", "rad_hor", "rad_celda1", "rad_celda2", 
-        #             "temp_amb", "temp_panel1", "temp_panel2", "vel_viento", "dir_viento", "hum_rel"]
-        # for column in lista_attr:
-        #     consulta_sql = f"""SELECT EXTRACT(MONTH FROM datetime_utc AT TIME ZONE '+00:00') AS month, 
-        #                                 AVG({column}) + {std_param_t} * STDDEV({column}) AS upper_lim,  
-        #                                 AVG({column}) - {std_param_t} * STDDEV({column}) AS lower_lim
-        #                             FROM {schema_name}.meteo_raw AS m
-        #                             JOIN {schema_name}.daylight AS d
-        #                                 ON m.datetime_utc::DATE = d.date
-        #                             WHERE m.datetime_utc BETWEEN d.sunrise AND d.sunset
-        #                             GROUP BY EXTRACT(MONTH FROM datetime_utc AT TIME ZONE '+00:00')
-        #                             ORDER BY 1;"""
-
-        #     metrics = pd.read_sql_query(consulta_sql, engine)
-        #     meteo_copy_df = meteo_df[meteo_df["daylight"] == True][["id", "datetime_utc", column]]
-        #     meteo_copy_df = pd.merge(meteo_copy_df, metrics, left_on=meteo_copy_df["datetime_utc"].dt.month, right_on="month")
-        #     outliers = meteo_copy_df[
-        #                     (meteo_copy_df[column] > meteo_copy_df["upper_lim"]) | 
-        #                     (meteo_copy_df[column] < meteo_copy_df["lower_lim"])]["id"].values
-        #     outlier_entrada.extend(outliers)
-            
-        #     consulta_sql = f"""SELECT EXTRACT(MONTH FROM datetime_utc AT TIME ZONE '+00:00') AS month, 
-        #                                 AVG({column}) + {std_param_f} * STDDEV({column}) AS upper_lim,  
-        #                                 AVG({column}) - {std_param_f} * STDDEV({column}) AS lower_lim
-        #                             FROM {schema_name}.meteo_raw AS m
-        #                             JOIN {schema_name}.daylight AS d
-        #                                 ON m.datetime_utc::DATE = d.date
-        #                             WHERE m.datetime_utc NOT BETWEEN d.sunrise AND d.sunset
-        #                             GROUP BY EXTRACT(MONTH FROM datetime_utc AT TIME ZONE '+00:00')
-        #                             ORDER BY 1;"""
-
-        #     metrics = pd.read_sql_query(consulta_sql, engine)
-        #     meteo_copy_df = meteo_df[meteo_df["daylight"] == False][["id", "datetime_utc", column]]
-        #     meteo_copy_df = pd.merge(meteo_copy_df, metrics, left_on=meteo_copy_df["datetime_utc"].dt.month, right_on="month")
-        #     outliers = meteo_copy_df[
-        #                     (meteo_copy_df[column] > meteo_copy_df["upper_lim"]) | 
-        #                     (meteo_copy_df[column] < meteo_copy_df["lower_lim"])]["id"].values
-        #     outlier_entrada.extend(outliers)
-        # outlier_entrada = set(outlier_entrada)
-        # meteo_df = meteo_df[~(meteo_df["id"].isin(outlier_entrada))]
-
         # Volcado de datos en la tabla meteo
         try:
             dtypes_meteo = {
                 'id': sqlalchemy.types.INTEGER(),
+                'parque_id': sqlalchemy.types.SMALLINT(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),
@@ -313,6 +245,7 @@ if __name__ == "__main__":
                 'vel_viento': sqlalchemy.types.Float(precision=3, asdecimal=True),
                 'dir_viento': sqlalchemy.types.Float(precision=3, asdecimal=True),
                 'hum_rel': sqlalchemy.types.Float(precision=3, asdecimal=True),
+                'presion_atm': sqlalchemy.types.Float(precision=3, asdecimal=True),
                 'elevation': sqlalchemy.types.Float(precision=3, asdecimal=True),
                 'azimuth': sqlalchemy.types.Float(precision=3, asdecimal=True),
                 'daylight': sqlalchemy.types.Boolean(),

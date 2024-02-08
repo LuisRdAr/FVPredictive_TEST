@@ -55,35 +55,32 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
         self.params = {}
         
     def objective(self, space_params, train_set, cv_folds):
+        n_estimators = int(space_params.pop('n_estimators'))
         params = {'device': self.device,
             'objective': 'reg:squarederror', 
             'tree_method': "hist", 
             'random_state': 42,
-            'n_jobs': -1,
-            'max_depth': int(space_params['max_depth']),
-            'gamma': space_params['gamma'],
-            'learning_rate': space_params['learning_rate'],
-            'min_child_weight': max(1, int(space_params['min_child_weight'])),
-            'subsample': space_params['subsample'],
-            'reg_alpha': space_params['reg_alpha'],
-            'reg_lambda': space_params['reg_lambda'],
-             }
-        cv_result = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = int(space_params["n_estimators"]), early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
+            'n_jobs': -1}
+        params = {**params, **space_params}
+        if 'max_depth' in params:
+            params['max_depth'] = int(params['max_depth'])
+        if 'min_child_weight' in params:
+            params['min_child_weight'] = max(1, int(params['min_child_weight']))
+        print
+        cv_result = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = n_estimators, early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
         score = cv_result['test-rmse-mean'].min()
         return {'loss': score, 'status': STATUS_OK}
-
-    def optimize(self, X, y, space, cv_folds, gamma = 1, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 250):
+        
+    def optimize(self, X, y, space, cv_folds, gamma_algo = 1, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 250):
         for col in tqdm(range(y.shape[1]), total = y.shape[1]):
+            if self.params.get(col) is not None:
+                space.update(self.params[col])
             train_set = xgb.DMatrix(X, label=y[:, col])
-            if col in self.trials:
-                trials = self.trials[col]
-            else:
-                trials = Trials()
+            trials = Trials()
             TOTAL_EVALS = len(trials.trials)
             STALL_LIMIT = STALL_LIMIT
             MAX_EVALS_PER_RUN = MAX_EVALS_PER_RUN
             best_loss = np.inf
-            gamma = gamma
             stall_counter = 0
             num_evals = TOTAL_EVALS
             run_counter = 0
@@ -91,7 +88,7 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
             while stall_counter < STALL_LIMIT and num_evals < TOTAL_EVALS + upper_limit:
                 best = fmin(fn=lambda space: self.objective(space, train_set = train_set, cv_folds = cv_folds), 
                         space = space, 
-                        algo = partial(tpe.suggest, gamma = gamma),
+                        algo = partial(tpe.suggest, gamma = gamma_algo),
                         max_evals = num_evals + MAX_EVALS_PER_RUN, 
                         trials = trials,
                         verbose = False)  # Cambiado a True para que devuelva los parámetros óptimos
@@ -108,23 +105,23 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
                     stall_counter += 1
                 num_evals += MAX_EVALS_PER_RUN
                 run_counter += 1
+                gamma_algo -= 0.05
             print(f"\tEntrenamiento para entrada {col+1} finalizado")
             print(f"\tNúmero de evaluaciones realizadas: {num_evals}")
             print(f"\tBest params: {best_params}")
             print(f"\tBest loss: {best_loss}")
 
-            params = {"device": self.device,
+            final_params = {"device": self.device,
                         "objective": 'reg:squarederror', 
                         "tree_method": "hist",
-                        "n_jobs": -1, 
-                        "gamma": best_params["gamma"],
-                        "learning_rate": best_params["learning_rate"],
-                        "max_depth": int(best_params["max_depth"]),
-                        "min_child_weight": max(1, int(best_params['min_child_weight'])),
-                        "reg_alpha": best_params["reg_alpha"],
-                        "reg_lambda": best_params["reg_lambda"],
-                        "subsample": best_params["subsample"]}
-            model = xgb.train(params, train_set, num_boost_round = int(best_params['n_estimators']))
+                        "n_jobs": -1}
+            final_params = {**final_params, **best_params}
+            final_params.pop('n_estimators')
+            if 'max_depth' in final_params:
+                final_params['max_depth'] = int(final_params['max_depth'])
+            if 'min_child_weight' in final_params:
+                final_params['min_child_weight'] = max(1, int(final_params['min_child_weight']))
+            model = xgb.train(final_params, train_set, num_boost_round = int(best_params['n_estimators']))
             self.models[col] = model
             self.trials[col] = trials
             self.params[col] = best_params  # Guardar los parámetros óptimos en su forma original
@@ -207,7 +204,6 @@ if schema_name == "galisteo":
                     AND (EXTRACT(MONTH FROM datetime_utc) != 10)
                     AND (alarma = 0)
                     AND (estado = 6)
-                    AND (dispositivo_id = 27)
                 ORDER BY datetime_utc)
         SELECT f.id, f.dispositivo_id, det.entrada_id, f.datetime_utc, potencia_act, lim_act, num_strings, 
                 rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, cloud_impact, 
@@ -236,7 +232,8 @@ elif schema_name == "bonete":
                         AND (EXTRACT(SECOND FROM datetime_utc) = 0)
                         AND (alarma = 0)
                         AND (estado = 6)
-                        AND (dispositivo_id = 27)),
+                        -- AND (dispositivo_id = 27)
+                        ),
                 met AS (
                     SELECT datetime_utc, AVG(rad_poa) AS rad_poa, AVG(rad_hor) AS rad_hor, AVG(rad_celda1) AS rad_celda1,
                             AVG(rad_celda2) AS rad_celda2, AVG(temp_amb) AS temp_amb, AVG(temp_panel1) AS temp_panel1,
@@ -391,30 +388,23 @@ for inv_id in np.sort(main_df["dispositivo_id"].unique()):
     X_prep = preprocessor.fit_transform(X)
 
     if optimizacion:
-        print("\tOptimización con espacio de búsqueda reducido")
-        space = {'max_depth': hp.quniform("max_depth", 3, 15, 3),
-                'n_estimators': hp.quniform('n_estimators', 100, 1500, 200),
-                'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
-                'gamma': hp.quniform ('gamma', 0, 1, 0.2),
-                'min_child_weight' : hp.quniform('min_child_weight', 1, 19, 3),
-                'subsample' : hp.quniform('subsample', 0.5, 1, 0.1),
-                'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 1),
-                'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 1)
-                }
+        print("\tOptimización del número de estimadores")
+        space = {'n_estimators': hp.quniform('n_estimators', 100, 1500, 5),
+                'learning_rate': hp.quniform('learning_rate', 0.01, 0.3, 0.005)}
         multioutput_model = MultiOutputOpt(model_class=XGBRegressor, device=device)
-        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 3, gamma = 1, STALL_LIMIT = 2, MAX_EVALS_PER_RUN = 2)
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 5, gamma_algo = 0.75, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 100)
 
-        print("\n\tOptimización con espacio de búsqueda detallado")
+        print("\n\tOptimización de profundidad, gamma, min_child_weight, subsample")
         space = {'max_depth': hp.quniform("max_depth", 3, 15, 1),
-                'n_estimators': hp.quniform('n_estimators', 100, 1500, 25),
-                'learning_rate': hp.quniform('learning_rate', 0.01, 0.2, 0.01),
                 'gamma': hp.quniform ('gamma', 0, 1, 0.01),
                 'min_child_weight' : hp.quniform('min_child_weight', 1, 20, 1),
-                'subsample' : hp.quniform('subsample', 0.5, 1, 0.05),
-                'reg_alpha' : hp.quniform('reg_alpha', 0, 10, 0.1),
-                'reg_lambda' : hp.quniform('reg_lambda', 0, 10, 0.1)
-                }
-        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 3, gamma = 0.33, STALL_LIMIT = 2, MAX_EVALS_PER_RUN = 2)
+                'subsample' : hp.quniform('subsample', 0.5, 1, 0.05)}
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 5, gamma_algo = 0.75, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 250)
+    
+        print("\n\tOptimización de parámetros de regularización")
+        space = {'reg_alpha' : hp.quniform('reg_alpha', 0, 20, 0.1),
+                'reg_lambda' : hp.quniform('reg_lambda', 0, 20, 0.1)}
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 5, gamma_algo = 0.75, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 100)
     
     else:
         if model_name == "XGBRegressor":
