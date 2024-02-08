@@ -98,59 +98,9 @@ if __name__ == "__main__":
                     -6.273260952948442);""")
             except psycopg2.errors.UniqueViolation:
                 pass
-        elif schema_name == "bonete":
-            try:
-                cur.execute(
-                    f"""INSERT INTO {schema_name}.parques VALUES(
-                    1, 
-                    'Bonete',
-                    'Castilla-La Mancha',
-                    49.9861,
-                    144511,
-                    38.84424629098432,
-                    -1.311788903978612);""")
-            except psycopg2.errors.UniqueViolation:
-                pass
-        elif schema_name == "alcazar":
-            try:
-                cur.execute(
-                    f"""INSERT INTO {schema_name}.parques VALUES(
-                    1, 
-                    'Alcazar_1',
-                    'Ciudad Real',
-                    0,
-                    0,
-                    39.347029,
-                    -3.318184),
-                    (2, 
-                    'Alcazar_2',
-                    'Ciudad Real',
-                    0,
-                    0,
-                    39.347029,
-                    -3.318184),
-                    (3, 
-                    'Alcazar_3',
-                    'Ciudad Real',
-                    0,
-                    0,
-                    39.347029,
-                    -3.318184);""")
-            except psycopg2.errors.UniqueViolation:
-                pass
-        elif schema_name == "manzanares":
-            try:
-                cur.execute(
-                    f"""INSERT INTO {schema_name}.parques VALUES(
-                    1, 
-                    'Manzanares',
-                    'Castilla-La Mancha',
-                    0,
-                    0,
-                    39.094280,
-                    -3.301643);""")
-            except psycopg2.errors.UniqueViolation:
-                pass
+        else:
+	   print("Esquema inválido")
+	   sys.exit()
         
         ########################################
         # CREACIÓN TABLA PARA LOS DISPOSITIVOS #

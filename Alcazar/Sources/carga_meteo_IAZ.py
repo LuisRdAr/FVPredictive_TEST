@@ -191,6 +191,7 @@ if __name__ == "__main__":
                                 'average_atmospheric_pressure': "presion_atm", 
                                 'radiation_pyranometer_1': "rad_hor",
                                 'radiation_pyranometer_2': "rad_poa",
+                                'average atmospheric pressure': "presion_atm",
                                 'temperature_uncleaned_cell': "temp_panel1",
                                 'temperature_cleaned_cell': "temp_panel2",
                                 'radiation_uncleaned_cell': "rad_celda1",
@@ -251,7 +252,8 @@ if __name__ == "__main__":
             'temp_panel2': sqlalchemy.types.Float(precision=3, asdecimal=True),
             'vel_viento': sqlalchemy.types.Float(precision=3, asdecimal=True),
             'dir_viento': sqlalchemy.types.Float(precision=3, asdecimal=True),
-            'hum_rel': sqlalchemy.types.Float(precision=3, asdecimal=True)}
+            'hum_rel': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'presion_atm': sqlalchemy.types.Float(precision=3, asdecimal=True),}
         keys = list(dtypes.keys())
         meteo_df = meteo_df.drop(columns=[col for col in meteo_df.columns if col not in keys])
         meteo_df.to_sql('meteo_raw', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes)
@@ -275,6 +277,10 @@ if __name__ == "__main__":
     hora_puesta_sol = []
     print("Calculando horas de salida y puesta del sol")
     for fecha in tqdm(fechas.itertuples(), total = fechas.shape[0]):
+        consulta_sql = f"""SELECT * FROM {schema_name}.daylight WHERE date = '{fecha[1].strftime("%Y-%m-%d")}';"""
+        check_date = pd.read_sql_query(consulta_sql, engine)
+        if not check_date.empty:
+            continue
         r = requests.get('https://api.sunrise-sunset.org/json', params={'lat': lat, 'lng': lon, 'date': fecha[1].strftime("%Y-%m-%d")}).json()['results']
         hora_salida_sol.append(pd.to_datetime(fecha[1].strftime("%Y-%m-%d") + " " + r['sunrise'], utc = True))
         hora_puesta_sol.append(pd.to_datetime(fecha[1].strftime("%Y-%m-%d") + " " + r['sunset'], utc = True))

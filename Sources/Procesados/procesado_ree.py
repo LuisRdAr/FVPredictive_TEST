@@ -51,16 +51,19 @@ if __name__ == "__main__":
         # Lectura de los datos de ree sin procesar limitados por el chunk_size
         consulta_sql = f"SELECT * FROM {schema_name}.ree_raw WHERE procesado = false ORDER BY id LIMIT {chunk_size};"
         ree_df = pd.read_sql_query(consulta_sql, engine)
+        ids = ree_df["id"].tolist()
         ree_df = ree_df.drop(columns = ["procesado", "datetime_procesado"])
 
         # Comprobación si el id del dispositivo está ya registrado y registro en caso de no ser así
-        for id in ree_df["dispositivo_id"].unique():
-            id_int = int(id)
-            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE dispositivo_id = %s;""", (id_int,))
+        for pair in ree_df[["parque_id", "dispositivo_id"]].drop_duplicates().values:
+            id_par = int(pair[0])
+            id_dis = int(pair[1])
+            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE parque_id = {id_par} AND dispositivo_id = {id_dis};""")
             resultados = cur.fetchall()
             if not resultados:
                 print("Generando entradas de nuevos dispositivos")
-                dispositivo = ree_df[(ree_df["dispositivo_id"] == id_int)][["parque_id", 
+                dispositivo = ree_df[(ree_df["parque_id"] == id_par) & 
+                                    (ree_df["dispositivo_id"] == id_dis)][["parque_id", 
                                                                             "dispositivo_id", 
                                                                             "nombre_dispositivo", 
                                                                             "ref", 
@@ -70,11 +73,9 @@ if __name__ == "__main__":
                 cur.execute(f"""INSERT INTO {schema_name}.dispositivos
                             VALUES(%s, %s, %s, %s, %s, %s);""", 
                             tuple(attr for attr in dispositivo.values[0]))
-                conn.commit()
-        
+            conn.commit()
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
-        ree_df = ree_df.drop(columns = ["parque_id",
-                            "descripcion_parque", 
+        ree_df = ree_df.drop(columns = ["descripcion_parque", 
                             "localizacion_parque",
                             "potencia_max", 
                             "num_paneles"])
@@ -87,6 +88,7 @@ if __name__ == "__main__":
         try:
             dtypes_ree = {
                 'id': sqlalchemy.types.INTEGER(),
+                'parque_id': sqlalchemy.types.INTEGER(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),
@@ -107,7 +109,6 @@ if __name__ == "__main__":
 
         # Actualización de la tabla ree_raw para indicar que los registros han sido procesados y la fecha de procesado
         # Se actualiza por trozos para evitar bloqueos de la tabla pasando un array de las ids a actualizar
-        ids = ree_df["id"].tolist()
         chunk_size_update = 100000
         id_chunks = [tuple(ids[i:i + chunk_size]) for i in range(0, len(ids), chunk_size_update)]
         for id_chunk in id_chunks:
