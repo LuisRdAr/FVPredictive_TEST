@@ -24,23 +24,14 @@ from sklearn.metrics import mean_squared_error as mse, \
                             r2_score as r2
 from sklearn.base import BaseEstimator, TransformerMixin
 from tqdm import tqdm
+import gc
 
-def discriminador(x, norm):
-
-    if norm:
-        amp_dc_norm = x["amp_dc"]
-    else:
-        amp_dc_norm = x["amp_dc"] / x["num_strings"]
-
-    amp_dc_std = 3 * amp_dc_norm.std()
-    amp_dc_mean = amp_dc_norm.mean()
-
-    outlier = (amp_dc_norm > amp_dc_mean + amp_dc_std) | (amp_dc_norm < amp_dc_mean - amp_dc_std)
-
-    results = x[["id", "datetime_utc", "dispositivo_id", "entrada_id"]]
-    results["outlier_2"] = outlier
-    results = results.reset_index(drop=True)
-    return results
+def discriminador(row):
+    mean = np.mean(row)
+    std = np.std(row)
+    threshold = 3 * std
+    outlier = np.abs(row - mean) > threshold
+    return outlier
 
 class MultiOutputOpt(BaseEstimator, TransformerMixin):
     def __init__(self, model_class=XGBRegressor, device="cpu", trials=None):
@@ -191,122 +182,50 @@ password = params['password'].replace('@', '%40')
 engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
 print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
 
-num_mod_string = 30
+num_mod_string = 28
 sup_mod = 2
 ids_parques = [1,2,3]
 for id_parque in ids_parques:
     print(f"Entrenamiento para el parque fotovoltaico {id_parque}", )
-    # main_query = f"""
-    #             WITH inv AS (
-    #                 SELECT id, parque_id, dispositivo_id, datetime_utc, potencia_act
-    #                     FROM {schema_name}.inversores
-    #                     WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
-    #                         AND (EXTRACT(SECOND FROM datetime_utc) = 0)
-    #                         AND parque_id = {id_parque}
-    #                         ),
-    #                 met AS (
-    #                     SELECT parque_id, datetime_utc, AVG(rad_poa) AS rad_poa, AVG(rad_hor) AS rad_hor, AVG(rad_celda1) AS rad_celda1,
-    #                             AVG(rad_celda2) AS rad_celda2, AVG(temp_amb) AS temp_amb, AVG(temp_panel1) AS temp_panel1,
-    #                             AVG(temp_panel2) AS temp_panel2, AVG(presion_atm) AS presion_atm, AVG(cloud_impact) AS cloud_impact, 
-    #                             BOOL_OR(daylight) AS daylight
-    #                         FROM {schema_name}.meteo
-    #                         WHERE parque_id = {id_parque}
-    #                             AND daylight = true
-    #                         GROUP BY parque_id, datetime_utc)
-    #             SELECT inv.id, inv.parque_id, inv.dispositivo_id, det.entrada_id, inv.datetime_utc, potencia_act, num_strings, 
-    #                     rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, presion_atm, cloud_impact, 
-    #                     motivo, consigna_pot_act_planta, amp_dc
-    #                 FROM inv
-    #                 JOIN {schema_name}.inversores_detalle AS det
-    #                     ON inv.id = det.id
-    #                 JOIN {schema_name}.distrib_inversores dist
-    #                     ON dist.parque_id = inv.parque_id
-    #                         AND dist.dispositivo_id = inv.dispositivo_id
-    #                         AND dist.entrada_id = det.entrada_id
-    #                 JOIN met
-    #                     ON met.parque_id = inv.parque_id
-    #                         AND met.datetime_utc = inv.datetime_utc
-    #                 JOIN {schema_name}.ree AS ree
-    #                     ON ree.datetime_utc = inv.datetime_utc
-    #                         AND ree.parque_id = inv.parque_id
-    #                 ORDER BY 5, 2, 3, 4;"""
-
     # Carga de los datos de entrenamiento
     main_query = f"""
-                WITH inv AS (
-                    SELECT 
-                        date_trunc('hour', datetime_utc) + 
-                        INTERVAL '5 min' * floor(date_part('minute', datetime_utc) / 5) as datetime_utc_rounded, 
-                        parque_id, 
-                        dispositivo_id,
-                        MIN(inv.id) AS id, 
-                        AVG(potencia_act) as potencia_act, 
-                        AVG(amp_dc) as amp_dc,
-                        det.entrada_id
-                    FROM alcazar.inversores AS inv
-                    JOIN alcazar.inversores_detalle AS det
-                        ON inv.id = det.id
-                    WHERE parque_id = 1
-                    GROUP BY parque_id, datetime_utc_rounded, dispositivo_id, det.entrada_id 
-                ),
-                met AS (
-                    SELECT 
-                        parque_id,
-                        date_trunc('hour', datetime_utc) + 
-                        INTERVAL '5 min' * floor(date_part('minute', datetime_utc) / 5) as datetime_utc_rounded, 
-                        AVG(rad_poa) AS rad_poa, 
-                        AVG(rad_hor) AS rad_hor, 
-                        AVG(rad_celda1) AS rad_celda1,
-                        AVG(rad_celda2) AS rad_celda2, 
-                        AVG(temp_amb) AS temp_amb, 
-                        AVG(temp_panel1) AS temp_panel1,
-                        AVG(temp_panel2) AS temp_panel2, 
-                        AVG(cloud_impact) AS cloud_impact, 
-                        AVG(presion_atm) AS presion_atm,
-                        BOOL_OR(daylight) AS daylight
-                    FROM alcazar.meteo
-                    WHERE parque_id = 1
-                        AND daylight = true
-                    GROUP BY parque_id, datetime_utc_rounded
-                )
-                SELECT 
-                    inv.id,
-                    inv.parque_id,
-                    inv.dispositivo_id,
-                    inv.entrada_id,
-                    inv.datetime_utc_rounded as datetime_utc, 
-                    potencia_act,  
-                    num_strings, 
-                    rad_poa,
-                    rad_hor, 
-                    rad_celda1, 
-                    rad_celda2, 
-                    temp_amb, 
-                    temp_panel1, 
-                    temp_panel2, 
-                    presion_atm,
-                    cloud_impact,
-                    motivo,
-                    consigna_pot_act_planta,
-                    amp_dc
-                FROM inv
-                JOIN alcazar.distrib_inversores dist
-                    ON dist.parque_id = inv.parque_id
-                        AND dist.dispositivo_id = inv.dispositivo_id
-                        AND dist.entrada_id = inv.entrada_id
-                JOIN met
-                    ON met.parque_id = inv.parque_id
-                        AND met.datetime_utc_rounded = inv.datetime_utc_rounded
-                JOIN alcazar.ree AS ree
-                    ON ree.datetime_utc = inv.datetime_utc_rounded
-                        AND ree.parque_id = inv.parque_id
-                ORDER BY 5, 2, 3, 4;"""
+        WITH inv AS (
+            SELECT id, parque_id, dispositivo_id, datetime_utc, potencia_act
+                FROM {schema_name}.inversores
+                WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 15 = 0)
+                        AND (EXTRACT(SECOND FROM datetime_utc) = 0)
+                        AND parque_id = {id_parque}
+                ORDER BY datetime_utc)
+        SELECT inv.id, inv.dispositivo_id, det.entrada_id, inv.datetime_utc, potencia_act, num_strings, 
+                rad_poa, rad_hor, rad_celda1, rad_celda2, temp_amb, temp_panel1, temp_panel2, presion_atm, cloud_impact, 
+                motivo, consigna_pot_act_planta, amp_dc
+            FROM inv
+            JOIN {schema_name}.inversores_detalle AS det
+                ON inv.id = det.id
+             JOIN {schema_name}.distrib_inversores dist
+                ON dist.parque_id = inv.parque_id
+                    AND dist.dispositivo_id = inv.dispositivo_id
+                    AND dist.entrada_id = det.entrada_id
+            JOIN {schema_name}.dispositivos AS disp
+                ON disp.dispositivo_id = inv.dispositivo_id
+                    AND disp.parque_id = inv.parque_id
+            JOIN {schema_name}.meteo AS met
+                ON met.dispositivo_id = disp.meteo_cercana_id
+                    AND met.datetime_utc = inv.datetime_utc
+                    AND met.parque_id = inv.parque_id
+            JOIN {schema_name}.ree AS ree
+                ON ree.datetime_utc = inv.datetime_utc
+                    AND ree.parque_id = inv.parque_id
+            WHERE daylight = true
+            ORDER BY 4, 2, 3;"""
 
     chunksize = 100000
     chunks = pd.read_sql_query(main_query, engine, chunksize=chunksize)
     main_df = pd.DataFrame()
     for chunk in chunks:
         main_df = pd.concat([main_df, chunk], ignore_index = True)
+    del chunks, chunk
+    gc.collect()
 
     # Normalización de la entrada de corriente continua, formateo de fechas y escalado de potencia
     print(f"\tCarga inicial de {main_df.shape[0]} registros")
@@ -318,34 +237,78 @@ for id_parque in ids_parques:
     main_df["datetime_utc"] = pd.to_datetime(main_df["datetime_utc"], utc = True)
     main_df["potencia_act"] = main_df["potencia_act"] * 1000
 
+    # Pivotado de las entradas de corriente continua
+    target_df = main_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc')
+    target_df.columns = ["amp_dc_" + str(col) for col in target_df.columns]
+    print(f"\tNúmero de registros del dataframe tras pivotar: {target_df.shape[0]}")
+
+    # Descarte de registros con corriente anómala
+    target_df["outlier"] = target_df.apply(discriminador, axis=1).any(axis=1)
+    n_corriente_outlier = target_df[target_df["outlier"]].shape[0]
+    target_df = target_df[~target_df["outlier"]].drop(columns="outlier")
+    print(f"\tRegistros descartados por outlier de corriente: {n_corriente_outlier}")
+
+    # Rellenado de valores faltantes por desconexión de entradas
+    consulta_sql = f"""SELECT MAX(entrada_id)
+                FROM {schema_name}.distrib_inversores
+                WHERE parque_id = {id_parque};"""
+    max_entradas = pd.read_sql_query(consulta_sql, engine).values[0][0]
+    entradas = [i for i in range(1, max_entradas + 1)]
+    for dispositivo in target_df.index.get_level_values(0).unique():
+        consulta_sql = f"""SELECT entrada_id
+                    FROM {schema_name}.distrib_inversores
+                    WHERE parque_id = {id_parque}
+                        AND dispositivo_id = {dispositivo};"""
+        entradas_inv = pd.read_sql_query(consulta_sql, engine).values.reshape(1,-1)[0]
+        entradas_off = list(set(entradas) - set(entradas_inv))
+        for entrada in entradas_off:
+            target_df.loc[dispositivo, "amp_dc_" + str(entrada)] = 0
+    
+    # Descarte de registros con corriente desconocida
+    n_nan_values = target_df[target_df.isna().any(axis=1)].shape[0]
+    target_df = target_df.dropna()
+    print(f"\tRegistros descartados por corriente desconocida: {n_nan_values}")
+
+    # Descarte de registros con corriente negativa
+    q1 = main_df[main_df['amp_dc'] < 0]['amp_dc'].quantile(0.25)
+    q3 = main_df[main_df['amp_dc'] < 0]['amp_dc'].quantile(0.75)
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    n_corriente_neg = target_df[target_df < lower_bound].dropna(how='all').shape[0]
+    target_df = target_df[target_df >= lower_bound].dropna(how='any')
+    target_df[(target_df >= lower_bound) & (target_df <= 0)] = 0
+    main_df = main_df.drop(columns=["entrada_id", "amp_dc"]).drop_duplicates(subset=["id", "datetime_utc"]).set_index(["dispositivo_id", "datetime_utc"])
+    main_df = main_df.merge(target_df, left_index=True, right_index=True, how="inner")
+    del target_df
+    gc.collect()
+    print(f"\tRegistros descartados por corriente negativa: {n_corriente_neg}")
+
+    # Búsqueda de outliers basándose en la potencia activa y la potencia solar
+    num_strings_inv = f"""SELECT dispositivo_id, SUM(num_strings) as num_strings 
+                            FROM {schema_name}.distrib_inversores
+                            GROUP BY dispositivo_id;"""
+    num_strings_inv = pd.read_sql_query(num_strings_inv, engine).sort_values(by="dispositivo_id")
+    potencia_df = pd.merge(main_df.reset_index()[["dispositivo_id", "datetime_utc", "potencia_act", "rad_poa"]], num_strings_inv, on="dispositivo_id").set_index(["dispositivo_id", "datetime_utc"])
+    potencia_df["potencia_solar"] = potencia_df["rad_poa"] * potencia_df["num_strings"] * num_mod_string * sup_mod
+    potencia_df["outlier_solar"] = np.where(potencia_df["potencia_act"] > 0.20 * potencia_df["potencia_solar"], True, False)
+    main_df = main_df.merge(potencia_df[["outlier_solar"]], left_index=True, right_index=True, how="inner")
+    print(f"Registros descartados por outlier de potencia: {main_df[main_df['outlier_solar'] == True].shape[0]}")
+    main_df = main_df[main_df["outlier_solar"] == False].drop(columns = ["outlier_solar"])
+    del potencia_df, num_strings_inv
+    gc.collect()
+
+    # Descarte de registros con potencia activa negativa
+    n_potencia_neg = main_df[main_df["potencia_act"] < 0].shape[0]
+    main_df = main_df[main_df["potencia_act"] >= 0]
+    print(f"\tRegistros descartados por potencia activa negativa: {n_potencia_neg}")
+
     # Manipulación de variables meteorológicas
     main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"])
     main_df["temp_panel"] = (main_df["temp_panel1"] + main_df["temp_panel2"]) / 2
     main_df = main_df.drop(columns = ["rad_celda1", "rad_celda2", "temp_panel1", "temp_panel2"])
 
-    # Búsqueda de outliers basándose en la potencia activa y la potencia solar
-    potencia_df = main_df.groupby(["dispositivo_id", "datetime_utc"]).agg({"num_strings": "sum",
-                                                                "rad_poa": "mean",
-                                                                "potencia_act": "mean"
-                                                                }).reset_index()
-    potencia_df["potencia_solar"] = potencia_df["rad_poa"] * potencia_df["num_strings"] * num_mod_string * sup_mod 
-    potencia_df["outlier_1"] = np.where(potencia_df["potencia_act"] > 0.20 * potencia_df["potencia_solar"], True, False)
-    main_df = main_df.merge(potencia_df[["dispositivo_id", "datetime_utc", "outlier_1"]], on = ["dispositivo_id", "datetime_utc"])
-    print(f"\tRegistros descartados por outlier de potencia: {main_df[main_df['outlier_1'] == True].shape[0]}")
-    main_df = main_df[main_df["outlier_1"] == False]
-
-    # Descarte de datos con corrientes negativa o muy grandes
-    print(f"\tRegistros descartados por corriente negativa: {main_df[(main_df['id'].isin(main_df[(main_df['amp_dc'] < -0.1)]['id'].unique()))].shape[0]}")
-    if normalizacion:
-        main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] < -0.1)]["id"].unique()))]
-    else:
-        main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] < -1)]["id"].unique()))]
-    amp_dc_mean = main_df["amp_dc"].mean() 
-    amp_dc_std = main_df["amp_dc"].std()
-    print(f"\tRegistros descartados por corrientes altas: {main_df[(main_df['id'].isin(main_df[(main_df['amp_dc'] > amp_dc_mean + 3 * amp_dc_std)]['id'].unique()))].shape[0]}")
-    main_df = main_df[~(main_df["id"].isin(main_df[(main_df["amp_dc"] > amp_dc_mean + 3 * amp_dc_std)]["id"].unique()))]
-
     # Manipulación de variables de consigna
+    main_df["motivo"] = main_df["motivo"].apply(lambda x: 0 if x == 0 else (2 if x == 7 else 1))
     main_query = f"""
         SELECT MAX(consigna_pot_act_planta)
             FROM {schema_name}.ree AS ree;"""
@@ -353,89 +316,47 @@ for id_parque in ids_parques:
     main_df["consigna_pot_act_planta"] = main_df["consigna_pot_act_planta"] / max_pot_act 
 
     # Asignación de variables temporales
-    main_df["dia_año"] = main_df["datetime_utc"].dt.dayofyear
+    main_df["dia_año"] = main_df.index.get_level_values("datetime_utc").dayofyear
     main_df["dia_año_sen"] = np.sin(main_df["dia_año"] * (2*np.pi/365))
-    main_df["hora_seg"] = main_df["datetime_utc"].dt.hour * 3600 + \
-                            main_df["datetime_utc"].dt.minute * 60 + \
-                            main_df["datetime_utc"].dt.second
+    main_df["hora_seg"] = main_df.index.get_level_values("datetime_utc").hour * 3600 + \
+                            main_df.index.get_level_values("datetime_utc").minute * 60 + \
+                            main_df.index.get_level_values("datetime_utc").second
     main_df["hora_seg_sen"] = np.sin(main_df["hora_seg"] * (2*np.pi/86400))
-
-    # Búsqueda de outliers en la corriente continua basándose en la desviación dentro del comportamiento del inversor en un instante dado
-    outliers = main_df.groupby(['datetime_utc', 'dispositivo_id']).apply(lambda x: discriminador(x, normalizacion)).reset_index(drop=True)
-    print(f"\tRegistros descartados por outlier de corriente: {main_df[(main_df['id'].isin(outliers[outliers['outlier_2'] == True]['id'].unique()))].shape[0]}")
-    main_df = main_df[~(main_df["id"].isin(outliers[outliers["outlier_2"] == True]["id"].unique()))]
 
     # Escalado de variables porcentuales
     main_df[['cloud_impact']] = main_df[['cloud_impact']].apply(lambda x: x/100)
 
-    for inv_id in np.sort(main_df["dispositivo_id"].unique()):
+    for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique()):
         # Separación de los datos de entrenamiento y validación
-        print(f"Dispositivo {inv_id}")
-        disp_df = main_df[main_df["dispositivo_id"] == inv_id].copy()
-        disp_df.dropna()
-        validation_df = disp_df[(disp_df["datetime_utc"].dt.year == 2023) &
-                                    ((disp_df["datetime_utc"].dt.month == 9) |
-                                    (disp_df["datetime_utc"].dt.month == 10) |
-                                    (disp_df["datetime_utc"].dt.month == 11) |
-                                    (disp_df["datetime_utc"].dt.month == 12))]
-        train_df = disp_df[(disp_df["datetime_utc"].dt.year != 2023) &
-                                    ((disp_df["datetime_utc"].dt.month != 9) |
-                                    (disp_df["datetime_utc"].dt.month != 10) |
-                                    (disp_df["datetime_utc"].dt.month != 11) |
-                                    (disp_df["datetime_utc"].dt.month != 12))]
-        print(f"\tRegistros de entrenamiento: {disp_df.shape[0]}")
-        print(f"\tRegistros de validación: {validation_df.shape[0]}")
+        print(f"\n\tDispositivo {inv_id}")
+        disp_df = main_df[main_df.index.get_level_values("dispositivo_id") == inv_id].copy()
+        disp_df = disp_df.dropna()
+        validation_ratio = 0.2
+        train_df, validation_df = train_test_split(disp_df, test_size = validation_ratio, random_state = 42)
+        print(f"\t\tRegistros de entrenamiento: {disp_df.shape[0]}")
+        print(f"\t\tRegistros de validación: {validation_df.shape[0]}")
 
-        # Agrupación de las entradas de corriente continua por inversor y por hora en una tabla dinámica
-        pivot_table = train_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc')
-        pivot_table.columns = ["amp_dc_" + str(col) for col in pivot_table.columns]
-        y = pivot_table
-        null_indices = y[y.isnull().any(axis=1)].index
-        null_indices_df = pd.DataFrame(null_indices.tolist(), columns=["dispositivo_id", "datetime_utc"])
-        merged_df = train_df.merge(null_indices_df, how='outer', indicator=True)
-        train_df = merged_df[merged_df['_merge'] == 'left_only'].drop(columns='_merge')
-        y = y.dropna()
-
-        pivot_table_val = validation_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc')
-        pivot_table_val.columns = ["amp_dc_" + str(col) for col in pivot_table_val.columns]
-        y_val = pivot_table_val
-        null_indices = y_val[y_val.isnull().any(axis=1)].index
-        null_indices_df = pd.DataFrame(null_indices.tolist(), columns=["dispositivo_id", "datetime_utc"])
-        merged_df = validation_df.merge(null_indices_df, how='outer', indicator=True)
-        validation_df = merged_df[merged_df['_merge'] == 'left_only'].drop(columns='_merge')
-        y_val = y_val.dropna()
-
-        # Descarte de variables que no se usarán en el entrenamiento
-        processed_df = train_df.drop(columns = ["id",
-                                        "parque_id",
-                                        "entrada_id",
-                                        "dia_año",
-                                        "hora_seg",
-                                        "potencia_act",
-                                        "outlier_1",
-                                        "num_strings"
-                                        ]).set_index(["datetime_utc",
-                                                        "dispositivo_id"])
-        processed_val_df = validation_df.drop(columns = ["id",
-                                        "parque_id",
-                                        "entrada_id",
-                                        "dia_año",
-                                        "hora_seg",
-                                        "potencia_act",
-                                        "outlier_1",
-                                        "num_strings"
-                                        ]).set_index(["datetime_utc",
-                                                        "dispositivo_id"])
-        
-        # Separación del target y descarte de filas duplicadas (una única fila por inversor y hora)
-        X = processed_df.drop(columns = ["amp_dc"]).drop_duplicates()
-        X_val = processed_val_df.drop(columns = ["amp_dc"]).drop_duplicates()
-        print(f"\tNúmero de registros para entrenamiento tras colapsar en dataframe multi-output: {X.shape[0]}")
+        # Separación de input y target
+        target_columns = train_df.filter(like="amp_dc").columns.tolist()
+        y = train_df.filter(like="amp_dc")
+        y_val = validation_df.filter(like="amp_dc")
+        X = train_df.drop(columns = target_columns+["id",
+                                    "dia_año",
+                                    "hora_seg",
+                                    "potencia_act",
+                                    "num_strings"
+                                    ])
+        X_val = validation_df.drop(columns = target_columns+["id",
+                                    "dia_año",
+                                    "hora_seg",
+                                    "potencia_act",
+                                    "num_strings"
+                                    ])
 
         # Estandarización/normalización de variables numéricas y codificación de variables categóricas
-        perc_attr = ['cloud_impact']
+        perc_attr = ['cloud_impact', 'consigna_pot_act_planta']
         std_attr = ['rad_poa', 'rad_hor', 'temp_amb', 'rad_diff', 'temp_panel', 'presion_atm']
-        cat_attr = ['motivo', 'consigna_pot_act_planta']
+        cat_attr = ['motivo']
 
         transformador_categorico = Pipeline([('onehot', OneHotEncoder(handle_unknown = 'ignore'))])                         # Introducir manualmente catergorías?
         transformador_numerico_std = Pipeline([('std_scaler', StandardScaler())]) 
@@ -484,23 +405,24 @@ for id_parque in ids_parques:
         pipeline_model = Pipeline([('preprocessor', preprocessor),
                                 ('regressor', multioutput_model)])
 
-        consulta_sql = f"""SELECT num_strings
+        consulta_sql = f"""SELECT dispositivo_id, entrada_id, num_strings
                         FROM {schema_name}.distrib_inversores
                         WHERE parque_id = {id_parque}
                             AND dispositivo_id = {inv_id};"""
-        num_strings = pd.read_sql_query(consulta_sql, engine).values.reshape(1, -1)
+        num_strings = pd.read_sql_query(consulta_sql, engine)
 
         if optimizacion:
             X_val_prep = pipeline_model.named_steps['preprocessor'].transform(X_val)
         else:
             X_val_prep = xgb.DMatrix(pipeline_model.named_steps['preprocessor'].transform(X_val))
         y_pred_val = pd.DataFrame(pipeline_model.named_steps['regressor'].predict(X_val_prep)).rename(columns={i: "y_pred_"+str(i+1) for i in pd.DataFrame(pipeline_model.named_steps['regressor'].predict(X_val_prep)).columns})
+        y_val_reesc = y_val.copy()
+        y_reesc = y.copy()
         if normalizacion:
-            y_pred_val = y_pred_val * num_strings
-            y_val_reesc = y_val * num_strings
-        else:
-            y_pred_val = y_pred_val
-            y_val_reesc = y_val
+            for entrada in num_strings["entrada_id"]:
+                y_pred_val["y_pred_"+str(entrada)] = y_pred_val["y_pred_"+str(entrada)] * num_strings[num_strings["entrada_id"] == entrada]["num_strings"].values[0]
+                y_val_reesc.loc[y_val.index, "amp_dc_"+str(entrada)] = y_val["amp_dc_"+str(entrada)] * num_strings[num_strings["entrada_id"] == entrada]["num_strings"].values[0]
+                y_reesc.loc[y.index, "amp_dc_"+str(entrada)] = y["amp_dc_"+str(entrada)] * num_strings[num_strings["entrada_id"] == entrada]["num_strings"].values[0]
         
         target_pred_df = pd.concat([X_val.reset_index(), y_pred_val], axis=1)[["datetime_utc", "dispositivo_id"]+y_pred_val.columns.to_list()] \
                                 .melt(id_vars=["datetime_utc", "dispositivo_id"], var_name="entrada_id", value_name="y_pred")
@@ -516,7 +438,7 @@ for id_parque in ids_parques:
         mae_score = round(mae(prediction_df["amp_dc"], prediction_df["y_pred"]), 2)
         r2_score = round(r2(prediction_df["amp_dc"], prediction_df["y_pred"]), 3)
         metricas = {"RMSE": rmse_score, "MAE": mae_score, "R2": r2_score}
-        print(f"\tMétricas de error:\n\t\tRMSE: {rmse_score}\n\t\tMAE: {mae_score}\n\t\tR2: {r2_score}")
+        print(f"\t\tMétricas de error:\n\t\t\tRMSE: {rmse_score}\n\t\t\tMAE: {mae_score}\n\t\t\tR2: {r2_score}")
 
         # Guardado del modelo y de las métricas
         algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
@@ -534,14 +456,12 @@ for id_parque in ids_parques:
                         "cross_validation": use_cv,
                         "metricas": metricas,
                         # "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
-                        "validation_range": {"start": validation_df["datetime_utc"].min().strftime("%Y-%m-%d %H:%M:%S"), 
-                                                "end": validation_df["datetime_utc"].max().strftime("%Y-%m-%d %H:%M:%S")},
+                        "validation_split": validation_ratio,
                         # "hiperparametros": {k:v for k,v in params.items() if v != None},
                         "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
-                        "training_target_description": (train_df["amp_dc"] * train_df["num_strings"]).describe().to_dict(),
+                        "training_target_description": y_reesc.describe().to_dict(),
                         }
             json.dump(informe, archivo_json)
-
 
         # Generación de gráficos: comparativa de valores reales y predichos, histograma de diferencias y matriz de correlación
         y_test_sampled, _,y_pred_sampled, _ = train_test_split(prediction_df["amp_dc"], prediction_df["y_pred"], train_size = 0.25)
@@ -565,7 +485,7 @@ for id_parque in ids_parques:
 
         plt.figure(figsize=(12, 8))
         plt.tight_layout()
-        sns.heatmap(processed_df.corr(), annot=True, fmt=".2f", cmap="coolwarm")
+        sns.heatmap(X.corr(), annot=True, fmt=".2f", cmap="coolwarm")
         plt.title("Matriz de correlación")
         plt.savefig(path + "correlacion.png")
 
@@ -576,7 +496,8 @@ for id_parque in ids_parques:
         for group in prediction_df.groupby(["dispositivo_id", "entrada_id"]):
             entrada_list.append(group[0][1])
             rmse_score = round(mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False), 2)
-            rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/group[1]['amp_dc'].mean()), 2)
+            epsilon = 1e-7  # A small constant
+            rmse_r_score = round((mse(group[1]["amp_dc"], group[1]["y_pred"], squared=False)*100/(group[1]['amp_dc'].mean() + epsilon)), 2)
             mae_score = round(mae(group[1]["amp_dc"], group[1]["y_pred"]), 2)
             r2_score = round(r2(group[1]["amp_dc"], group[1]["y_pred"]), 3)
             rmse_list.append(rmse_score)
@@ -595,7 +516,10 @@ for id_parque in ids_parques:
         ax2 = ax1.twinx()
         color = 'tab:red'
         ax2.set_ylabel('RMSE Relativo', color=color)
-        if rmse_r_score.max() - rmse_r_score.min() > 0.25:
+        if np.isfinite(rmse_r_score).all():
+            if rmse_r_score.max() - rmse_r_score.min() > 0.25:
+                ax2.set_yscale('log')
+        else:
             ax2.set_yscale('log')
         ax2.plot(entrada_list, rmse_r_list, color=color, linewidth=1)
         sns.scatterplot(x=entrada_list, y=rmse_r_list, color=color, ax=ax2)
