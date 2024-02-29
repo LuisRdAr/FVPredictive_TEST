@@ -131,7 +131,7 @@ password = params['password'].replace('@', '%40')
 engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
 print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
 
-intervalo_min = 15
+intervalo_min = 30
 num_mod_string = 30
 sup_mod = 2
 # Carga de los datos de entrenamiento
@@ -227,7 +227,8 @@ print(f"Número de registros del dataframe tras pivotar: {target_df.shape[0]}")
 target_df["outlier"] = target_df.apply(discriminador, axis=1).any(axis=1)
 n_corriente_outlier = target_df[target_df["outlier"]].shape[0]
 target_df = target_df[~target_df["outlier"]].drop(columns="outlier")
-print(f"Registros descartados por outlier de corriente: {n_corriente_outlier}")
+print(f"Registros descartados por corrientes anómalas ingresando en el inversor: {n_corriente_outlier}")
+
 # Rellenado de valores faltantes por desconexión de entradas
 consulta_sql = f"""SELECT MAX(entrada_id)
             FROM {schema_name}.distrib_inversores;"""
@@ -318,17 +319,19 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     # Separación de input y target
     y = train_df[["potencia_act"]].copy()
     y_val = validation_df[["potencia_act"]].copy()
-    target_columns = train_df.filter(like="amp_dc").columns.tolist()
-    X = train_df.drop(columns = target_columns+["id",
-                                "dia_año",
-                                "hora_seg",
-                                "potencia_act"
-                                ])
-    X_val = validation_df.drop(columns = target_columns+["id",
-                                "dia_año",
-                                "hora_seg",
-                                "potencia_act"
-                                ])
+    amp_columns = train_df.filter(like="amp_dc").columns.tolist()
+    X = train_df.drop(columns = amp_columns+["id",
+                                            "num_strings",
+                                            "dia_año",
+                                            "hora_seg",
+                                            "potencia_act"
+                                            ])
+    X_val = validation_df.drop(columns = amp_columns+["id",
+                                                    "num_strings",
+                                                    "dia_año",
+                                                    "hora_seg",
+                                                    "potencia_act"
+                                                    ])
 
     # Estandarización/normalización de variables numéricas y codificación de variables categóricas
     perc_attr = ['cloud_impact', 'consigna_pot_act_planta']
@@ -455,18 +458,6 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
         pickle.dump(pipeline_model, archivo_salida)
-    with open(path+'informe_modelo.json', 'w') as archivo_json:
-        informe = {"normalizacion": normalizacion,
-                    "optimizacion": optimizacion,
-                    "por_fases": stage,
-                    "intervalo_min": intervalo_min,
-                    "metricas": metricas,
-                    "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
-                    "hiperparametros": {k:v for k,v in train_params.items() if v != None},
-                    "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
-                    "training_target_description": train_df["potencia_act"].describe().to_dict(),
-                    }
-        json.dump(informe, archivo_json)
 
     # Generación de gráficos: comparativa de valores reales y predichos, histograma de diferencias y matriz de correlación
     plt.figure()
@@ -532,3 +523,17 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     ax2.grid(True, which='minor', color='gray', linewidth=0.5)
     plt.savefig(path + "rmse_hora.png")
     plt.close("all")
+
+    with open(path+'informe_modelo.json', 'w') as archivo_json:
+        informe = {"normalizacion": normalizacion,
+                    "optimizacion": optimizacion,
+                    "por_fases": stage,
+                    "intervalo_min": intervalo_min,
+                    "metricas": metricas,
+                    "metricas_hora": {k:v for k,v in zip(hora_list, rmse_list)},
+                    "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
+                    "hiperparametros": {k:v for k,v in train_params.items() if v != None},
+                    "training_input_description": train_df[perc_attr + std_attr].describe().loc[["mean", "std", "min", "max"]].to_dict(),
+                    "training_target_description": train_df["potencia_act"].describe().to_dict(),
+                    }
+        json.dump(informe, archivo_json)
