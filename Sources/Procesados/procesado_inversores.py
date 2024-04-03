@@ -100,7 +100,7 @@ if __name__ == "__main__":
         try:
             dtypes_inv = {
                 'id': sqlalchemy.types.INTEGER(),
-                'parque_id': sqlalchemy.types.SMALLINT(),
+                #'parque_id': sqlalchemy.types.SMALLINT(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),

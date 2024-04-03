@@ -122,54 +122,74 @@ if __name__ == "__main__":
         lista_attr = ["rad_poa", "rad_hor", "rad_celda1", "rad_celda2", 
                     "temp_amb", "temp_panel1", "temp_panel2", "vel_viento", "dir_viento", "hum_rel"]
         metrics = pd.DataFrame()
-        for column in lista_attr:
-            consulta_sql = f"""SELECT percentile_cont(0.25) WITHIN GROUP(ORDER BY {column}) AS percentile_25,
+        metrics["column"] = lista_attr
+        percentile_25 = []
+        percentile_75 = []
+        consulta_sql = f"""SELECT COUNT(*) FROM {schema_name}.meteo"""
+        count = pd.read_sql_query(consulta_sql, engine).values[0][0]
+        if count == 0:
+            for column in lista_attr:
+                percentile_25.append(rad_df[column].quantile(0.25))
+                percentile_75.append(rad_df[column].quantile(0.75))
+        else:
+            for column in lista_attr:
+                consulta_sql = f"""SELECT percentile_cont(0.25) WITHIN GROUP(ORDER BY {column}) AS percentile_25,
                                         percentile_cont(0.75) WITHIN GROUP(ORDER BY {column}) AS percentile_75
-                                    FROM {schema_name}.meteo_raw AS m
+                                    FROM {schema_name}.meteo AS m
                                     JOIN {schema_name}.daylight AS d
                                         ON m.datetime_utc::DATE = d.date
                                     WHERE m.datetime_utc BETWEEN d.sunrise AND d.sunset AND
                                         (m.dispositivo_id = 41 OR m.dispositivo_id = 42 OR m.dispositivo_id = 43) AND
                                         (m.vel_viento != 'NaN' AND m.dir_viento != 'NaN' AND m.hum_rel != 'NaN');"""
-
-            metrics = pd.concat([metrics,pd.read_sql_query(consulta_sql, engine)])
-        metrics["column"] = lista_attr
+                values = pd.read_sql_query(consulta_sql, engine).values[0]
+                percentile_25.append(values[0])
+                percentile_75.append(values[1])
+        metrics["percentile_25"] = percentile_25
+        metrics["percentile_75"] = percentile_75   
         metrics["upper_lim"] = metrics["percentile_75"] + 1.5 * (metrics["percentile_75"] - metrics["percentile_25"])
+        metrics["lower_lim"] = metrics["percentile_25"] - 1.5 * (metrics["percentile_75"] - metrics["percentile_25"])
 
-        clean_rad_df = rad_df[(rad_df["rad_poa"] >= 0) & (rad_df["rad_poa"] <= metrics[metrics["column"] == "rad_poa"]["upper_lim"].values[0]) &
-                        (rad_df["rad_hor"] >= 0) & (rad_df["rad_hor"] <= metrics[metrics["column"] == "rad_hor"]["upper_lim"].values[0]) &
-                        (rad_df["rad_celda1"] >= 0) & (rad_df["rad_celda1"] <= metrics[metrics["column"] == "rad_celda1"]["upper_lim"].values[0]) &
-                        (rad_df["rad_celda2"] >= 0) & (rad_df["rad_celda2"] <= metrics[metrics["column"] == "rad_celda2"]["upper_lim"].values[0]) &
-                        (rad_df["temp_amb"] >= -273.15) & (rad_df["temp_amb"] <= metrics[metrics["column"] == "temp_amb"]["upper_lim"].values[0]) &
-                        (rad_df["temp_panel1"] >= -273.15) & (rad_df["temp_panel1"] <= metrics[metrics["column"] == "temp_panel1"]["upper_lim"].values[0]) &
-                        (rad_df["temp_panel2"] >= -273.15) & (rad_df["temp_panel2"] <= metrics[metrics["column"] == "temp_panel2"]["upper_lim"].values[0])]
+        clean_rad_df = rad_df[(rad_df["rad_poa"] >= max([0, metrics[metrics["column"] == "rad_poa"]["lower_lim"].values[0]])) & 
+                                    (rad_df["rad_poa"] <= metrics[metrics["column"] == "rad_poa"]["upper_lim"].values[0]) &
+                                (rad_df["rad_hor"] >= max([0, metrics[metrics["column"] == "rad_hor"]["lower_lim"].values[0]])) & 
+                                    (rad_df["rad_hor"] <= metrics[metrics["column"] == "rad_hor"]["upper_lim"].values[0]) &
+                                (rad_df["rad_celda1"] >= max([0, metrics[metrics["column"] == "rad_celda1"]["lower_lim"].values[0]])) & 
+                                    (rad_df["rad_celda1"] <= metrics[metrics["column"] == "rad_celda1"]["upper_lim"].values[0]) &
+                                (rad_df["rad_celda2"] >= max([0, metrics[metrics["column"] == "rad_celda2"]["lower_lim"].values[0]])) & 
+                                    (rad_df["rad_celda2"] <= metrics[metrics["column"] == "rad_celda2"]["upper_lim"].values[0]) &
+                                (rad_df["temp_amb"] >= max([-273.15, metrics[metrics["column"] == "temp_amb"]["lower_lim"].values[0]])) & 
+                                    (rad_df["temp_amb"] <= metrics[metrics["column"] == "temp_amb"]["upper_lim"].values[0]) &
+                                (rad_df["temp_panel1"] >= max([-273.15, metrics[metrics["column"] == "temp_panel1"]["lower_lim"].values[0]])) & 
+                                    (rad_df["temp_panel1"] <= metrics[metrics["column"] == "temp_panel1"]["upper_lim"].values[0]) &
+                                (rad_df["temp_panel2"] >= max([-273.15, metrics[metrics["column"] == "temp_panel2"]["lower_lim"].values[0]])) & 
+                                    (rad_df["temp_panel2"] <= metrics[metrics["column"] == "temp_panel2"]["upper_lim"].values[0])]
         outliers_iqr += rad_df.shape[0] - clean_rad_df.shape[0]
 
         # Descarte de registros donde los instrumentos no funcionasen bien  <-- PENDIENTE DE REVISIÓN
         # Se descartan los registros donde el comportamiento medio de los sensores no supere un umbral
-        agg_df = clean_rad_df.groupby(["dispositivo_id", "date"])[["rad_poa", 
-                                                            "rad_hor", 
-                                                            "rad_celda1", 
-                                                            "rad_celda2", 
-                                                            "temp_amb", 
-                                                            "temp_panel1", 
-                                                            "temp_panel2"]].agg({"rad_poa": "mean", 
-                                                                                    "rad_hor": "mean",
-                                                                                    "rad_celda1": "mean",
-                                                                                    "rad_celda2": "mean",
-                                                                                    "temp_amb": "mean",
-                                                                                    "temp_panel1": "mean",
-                                                                                    "temp_panel2": "mean"}).reset_index()
-        agg_df = agg_df[(agg_df["rad_poa"] > 50) & 
-                        (agg_df["rad_hor"] > 50) &
-                        (agg_df["rad_celda1"] > 50) &
-                        (agg_df["rad_celda2"] > 50) &
-                        (agg_df["temp_amb"] > 0) &
-                        (agg_df["temp_panel1"] > 0) &
-                        (agg_df["temp_panel2"] > 0)][["dispositivo_id", "date"]]
-        num_rows = clean_rad_df.shape[0]
-        clean_rad_df = pd.merge(agg_df[["dispositivo_id", "date"]], clean_rad_df, left_on=["dispositivo_id", "date"], right_on=["dispositivo_id", "date"], how="inner")
-        outliers_off += num_rows - clean_rad_df.shape[0]
+        # agg_df = clean_rad_df.groupby(["dispositivo_id", "date"])[["rad_poa", 
+        #                                                     "rad_hor", 
+        #                                                     "rad_celda1", 
+        #                                                     "rad_celda2", 
+        #                                                     "temp_amb", 
+        #                                                     "temp_panel1", 
+        #                                                     "temp_panel2"]].agg({"rad_poa": "mean", 
+        #                                                                             "rad_hor": "mean",
+        #                                                                             "rad_celda1": "mean",
+        #                                                                             "rad_celda2": "mean",
+        #                                                                             "temp_amb": "mean",
+        #                                                                             "temp_panel1": "mean",
+        #                                                                             "temp_panel2": "mean"}).reset_index()
+        # agg_df = agg_df[(agg_df["rad_poa"] > 50) & 
+        #                 (agg_df["rad_hor"] > 50) &
+        #                 (agg_df["rad_celda1"] > 50) &
+        #                 (agg_df["rad_celda2"] > 50) &
+        #                 (agg_df["temp_amb"] > 0) &
+        #                 (agg_df["temp_panel1"] > 0) &
+        #                 (agg_df["temp_panel2"] > 0)][["dispositivo_id", "date"]]
+        # num_rows = clean_rad_df.shape[0]
+        # clean_rad_df = pd.merge(agg_df[["dispositivo_id", "date"]], clean_rad_df, left_on=["dispositivo_id", "date"], right_on=["dispositivo_id", "date"], how="inner")
+        # outliers_off += num_rows - clean_rad_df.shape[0]
         # Compleción de los registros relativos al viento y humedad (solo una estación registra los datos en Galisteo, 
         # y los anemómetros se encuentran separados de las estaciones en Bonete)
         if schema_name.lower() == "galisteo":
@@ -298,6 +318,7 @@ if __name__ == "__main__":
         try:
             dtypes_meteo = {
                 'id': sqlalchemy.types.INTEGER(),
+                #'parque_id': sqlalchemy.types.SMALLINT(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),
@@ -344,5 +365,5 @@ if __name__ == "__main__":
     cur.close()
     conn.close()
     print("Número de registros descartados por IQR: ", outliers_iqr)
-    print("Número de registros descartados por outliers de sensores: ", outliers_off)
+    # print("Número de registros descartados por outliers de sensores: ", outliers_off)
     print("Número de registros cargados inicialmente: ", count)

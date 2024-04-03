@@ -13,7 +13,7 @@ from tqdm import tqdm
 warnings.simplefilter(action='ignore', category=FutureWarning)
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder
 from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
 import xgboost as xgb
@@ -109,9 +109,6 @@ if optimizacion:
                 device = "cuda"
             else:
                 device = "cpu"
-    else:
-        device = "cpu"
-        print("No se ha detectado una GPU disponible, se utilizará la CPU para el entrenamiento")
 else:
     stage = False
     device = 'cpu'
@@ -122,7 +119,7 @@ root_path = os.getcwd()
 params = None
 for filename in os.listdir(root_path):
     if "params.json" in filename:
-        with open(os.path.join(root_path, filename, )) as f:
+        with open(os.path.join(root_path, filename)) as f:
             params = json.load(f)
 if params is None:
     print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
@@ -134,49 +131,50 @@ password = params['password'].replace('@', '%40')
 engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
 print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
 
-intervalo_min = 30
+intervalo_min = 15
 num_mod_string = 30
 sup_mod = 2
 # Carga de los datos de entrenamiento
 main_query = f"""
             WITH inv AS (
                 SELECT 
-                    inv.id,
-                    datetime_utc,
+                    date_trunc('hour', datetime_utc) + 
+                    INTERVAL '{intervalo_min} min' * floor(date_part('minute', datetime_utc) / {intervalo_min}) as datetime_utc_rounded,
                     dispositivo_id,
-                    det.entrada_id,
-                    potencia_act, 
-                    amp_dc
+                    MIN(inv.id) AS id, 
+                    AVG(potencia_act) as potencia_act, 
+                    AVG(amp_dc) as amp_dc,
+                    det.entrada_id
                 FROM {schema_name}.inversores AS inv
                 JOIN {schema_name}.inversores_detalle AS det
                     ON inv.id = det.id
-                WHERE (EXTRACT(MINUTE FROM datetime_utc) %% 5 = 0)
-                    AND (EXTRACT(SECOND FROM datetime_utc) = 0)
-                    AND (dispositivo_id != 26)
-                    AND (alarma = 0)
+                WHERE (alarma = 0)
                     AND (estado = 6)
-                ),
+                GROUP BY datetime_utc_rounded, dispositivo_id, det.entrada_id 
+            ),
             met AS (
                 SELECT 
-                    datetime_utc, 
+                    date_trunc('hour', datetime_utc) + 
+                    INTERVAL '{intervalo_min} min' * floor(date_part('minute', datetime_utc) / {intervalo_min}) as datetime_utc_rounded, 
                     dispositivo_id,
-                    rad_poa, 
-                    rad_hor, 
-                    rad_celda1,
-                    rad_celda2, 
-                    temp_amb, 
-                    temp_panel1,
-                    temp_panel2, 
-                    cloud_impact,
-                    daylight
+                    AVG(rad_poa) AS rad_poa, 
+                    AVG(rad_hor) AS rad_hor, 
+                    AVG(rad_celda1) AS rad_celda1,
+                    AVG(rad_celda2) AS rad_celda2, 
+                    AVG(temp_amb) AS temp_amb, 
+                    AVG(temp_panel1) AS temp_panel1,
+                    AVG(temp_panel2) AS temp_panel2, 
+                    AVG(cloud_impact) AS cloud_impact,
+                    BOOL_OR(daylight) AS daylight
                 FROM {schema_name}.meteo
                     WHERE daylight = true
-                )
+                GROUP BY dispositivo_id, datetime_utc_rounded
+            )
             SELECT 
                 inv.id,
                 inv.dispositivo_id,
                 inv.entrada_id,
-                inv.datetime_utc, 
+                inv.datetime_utc_rounded as datetime_utc, 
                 potencia_act,  
                 num_strings, 
                 rad_poa,
@@ -197,10 +195,10 @@ main_query = f"""
             JOIN {schema_name}.dispositivos AS disp
                 ON disp.dispositivo_id = inv.dispositivo_id
             JOIN met
-                ON met.datetime_utc = inv.datetime_utc
+                ON met.datetime_utc_rounded = inv.datetime_utc_rounded
                     AND met.dispositivo_id = disp.meteo_cercana_id
             JOIN {schema_name}.ree AS ree
-                ON ree.datetime_utc = inv.datetime_utc
+                ON ree.datetime_utc = inv.datetime_utc_rounded
             ORDER BY 5, 2, 3, 4;"""
 
 chunksize = 100000
@@ -220,14 +218,14 @@ main_df["datetime_utc"] = pd.to_datetime(main_df["datetime_utc"], utc = True)
 main_df["potencia_act"] = main_df["potencia_act"] * 1000
 
 # Pivotado de las entradas de corriente continua
-target_df = main_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc')
-target_df.columns = ["amp_dc_" + str(col) for col in target_df.columns]
-print(f"Número de registros del dataframe tras pivotar: {target_df.shape[0]}")
+amp_df = main_df.pivot(index=["dispositivo_id", "datetime_utc"], columns='entrada_id', values='amp_dc')
+amp_df.columns = ["amp_dc_" + str(col) for col in amp_df.columns]
+print(f"Número de registros del dataframe tras pivotar: {amp_df.shape[0]}")
 
 # Descarte de registros con corriente anómala
-target_df["outlier"] = target_df.apply(discriminador, axis=1).any(axis=1)
-n_corriente_outlier = target_df[target_df["outlier"]].shape[0]
-target_df = target_df[~target_df["outlier"]].drop(columns="outlier")
+amp_df["outlier"] = amp_df.apply(discriminador, axis=1).any(axis=1)
+n_corriente_outlier = amp_df[amp_df["outlier"]].shape[0]
+amp_df = amp_df[~amp_df["outlier"]].drop(columns="outlier")
 print(f"Registros descartados por corrientes anómalas ingresando en el inversor: {n_corriente_outlier}")
 
 # Rellenado de valores faltantes por desconexión de entradas
@@ -235,18 +233,18 @@ consulta_sql = f"""SELECT MAX(entrada_id)
             FROM {schema_name}.distrib_inversores;"""
 max_entradas = pd.read_sql_query(consulta_sql, engine).values[0][0]
 entradas = [i for i in range(1, max_entradas + 1)]
-for dispositivo in target_df.index.get_level_values(0).unique():
+for dispositivo in amp_df.index.get_level_values(0).unique():
     consulta_sql = f"""SELECT entrada_id
                 FROM {schema_name}.distrib_inversores
                 WHERE dispositivo_id = {dispositivo};"""
     entradas_inv = pd.read_sql_query(consulta_sql, engine).values.reshape(1,-1)[0]
     entradas_off = list(set(entradas) - set(entradas_inv))
     for entrada in entradas_off:
-        target_df.loc[dispositivo, "amp_dc_" + str(entrada)] = 0
+        amp_df.loc[dispositivo, "amp_dc_" + str(entrada)] = 0
 
 # Descarte de registros con corriente desconocida
-n_nan_values = target_df[target_df.isna().any(axis=1)].shape[0]
-target_df = target_df.dropna()
+n_nan_values = amp_df[amp_df.isna().any(axis=1)].shape[0]
+amp_df = amp_df.dropna()
 print(f"Registros descartados por corriente desconocida: {n_nan_values}")
 
 # Descarte de registros con corriente negativa
@@ -254,12 +252,12 @@ q1 = main_df[main_df['amp_dc'] < 0]['amp_dc'].quantile(0.25)
 q3 = main_df[main_df['amp_dc'] < 0]['amp_dc'].quantile(0.75)
 iqr = q3 - q1
 lower_bound = q1 - 1.5 * iqr
-n_corriente_neg = target_df[target_df < lower_bound].dropna(how='all').shape[0]
-target_df = target_df[target_df >= lower_bound].dropna(how='any')
-target_df[(target_df >= lower_bound) & (target_df <= 0)] = 0
+n_corriente_neg = amp_df[amp_df < lower_bound].dropna(how='all').shape[0]
+amp_df = amp_df[amp_df >= lower_bound].dropna(how='any')
+amp_df[(amp_df >= lower_bound) & (amp_df <= 0)] = 0
 main_df = main_df.drop(columns=["entrada_id", "amp_dc"]).drop_duplicates(subset=["id", "datetime_utc"]).set_index(["dispositivo_id", "datetime_utc"])
-main_df = main_df.merge(target_df, left_index=True, right_index=True, how="inner")
-del target_df
+main_df = main_df.merge(amp_df, left_index=True, right_index=True, how="inner")
+del amp_df
 gc.collect()
 print(f"Registros descartados por corriente negativa: {n_corriente_neg}")
 
@@ -283,25 +281,15 @@ main_df = main_df[main_df["potencia_act"] >= 0]
 print(f"Registros descartados por potencia activa negativa: {n_potencia_neg}")
 
 # Manipulación de variables meteorológicas
-# main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"]) 
-# mean_rad_diff = main_df["rad_diff"].mean()
-# std_rad_diff = main_df["rad_diff"].std()
-# main_df = main_df[(main_df["rad_diff"] >= mean_rad_diff - std_rad_diff) & (main_df["rad_diff"] <= mean_rad_diff + 6 * std_rad_diff)]
-# main_df["rad_diff"] = main_df["rad_diff"] / (main_df["rad_celda1"] + 1)
-# main_df["temp_amb"] = main_df["temp_amb"] + 273.15
-# main_df["temp_panel1"] = main_df["temp_panel1"] + 273.15
-# main_df["temp_panel2"] = main_df["temp_panel2"] + 273.15
-# main_df["temp_panel_abs"] = ((main_df["temp_panel1"] + main_df["temp_panel2"]) / 2)
-# main_df["temp_panel_diff"] = main_df["temp_panel_abs"] - main_df["temp_amb"]
-# #main_df["temp_panel_norm"] = main_df["temp_panel_abs"] / main_df["rad_poa"]
-# main_df["temp_panel_diff_norm"] = main_df["temp_panel_diff"] / main_df["rad_poa"]
-# main_df = main_df.drop(columns = ["rad_celda1", "rad_celda2", "temp_panel1", "temp_panel2"])
 main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"]) / main_df["rad_celda1"]
-main_df["temp_amb"] = main_df["temp_amb"] + 273.15
-main_df["temp_panel1"] = main_df["temp_panel1"] + 273.15
-main_df["temp_panel2"] = main_df["temp_panel2"] + 273.15
-main_df["temp_panel"] = ((main_df["temp_panel1"] + main_df["temp_panel2"]) / 2) #/ (main_df["temp_amb"])
+main_df["temp_panel"] = (((main_df["temp_panel1"] + main_df["temp_panel2"]) / 2)) - main_df["temp_amb"]
 main_df = main_df.drop(columns = ["rad_celda1", "rad_celda2", "temp_panel1", "temp_panel2"])
+# Descarte de registros con diferencias de radiación anómalas
+rad_diff_mean = main_df["rad_diff"].mean()
+rad_diff_std = main_df["rad_diff"].std()
+outliers_rad_diff = main_df[(main_df["rad_diff"] < rad_diff_mean - rad_diff_std) | (main_df["rad_diff"] > rad_diff_mean + 6 * rad_diff_std)].shape[0]
+main_df = main_df[(main_df["rad_diff"] > rad_diff_mean - rad_diff_std) & (main_df["rad_diff"] < rad_diff_mean + 6 * rad_diff_std)]
+print(f"Registros descartados por diferencias de radiación anómalas: {outliers_rad_diff}")
 
 # Manipulación de variables de consigna
 main_df["motivo"] = main_df["motivo"].apply(lambda x: 0 if x == 0 else (2 if x == 7 else 1))
@@ -352,13 +340,16 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
 
     # Estandarización/normalización de variables numéricas y codificación de variables categóricas
     perc_attr = ['cloud_impact', 'consigna_pot_act_planta']
-    std_attr = ['rad_poa', 'temp_amb', 'rad_diff', 'temp_panel']
+    std_attr = []
+    norm_attr = ['rad_poa', 'temp_amb', 'rad_diff', 'temp_panel']
     cat_attr = ['motivo']
 
     transformador_categorico = Pipeline([('onehot', OneHotEncoder(handle_unknown = 'ignore'))]) # Introducir manualmente catergorías?
     transformador_numerico_std = Pipeline([('std_scaler', StandardScaler())]) 
+    transformador_numerico_norm = Pipeline([('minmax_scaler', MinMaxScaler())])
 
     preprocessor = ColumnTransformer(transformers=[('cat', transformador_categorico, cat_attr),
+                                                   ('norm', transformador_numerico_norm, norm_attr),
                                                 ('std', transformador_numerico_std, std_attr)],
                                 remainder='passthrough')
     X_prep = preprocessor.fit_transform(X)
@@ -421,7 +412,7 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
                     'subsample' : hp.uniform('subsample', 0.4, 1),
                     'reg_alpha' : hp.uniform('reg_alpha', 0, 50),
                     'reg_lambda' : hp.uniform('reg_lambda', 0, 50)}
-            best_params = optimize_hyperparameters(space, dtrain, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 100, cv_folds = 5, verbose = True)
+            best_params = optimize_hyperparameters(space, dtrain, STALL_LIMIT = 10, MAX_EVALS_PER_RUN = 250, cv_folds = 10)
         end_time = time.time()
         execution_time = end_time - start_time
         execution_hours = int(execution_time // 3600)
@@ -465,18 +456,17 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
             f"R2: {r2_score}",
             sep = "\n")
 
-    # Guardado del modelo
+    # Guardado del modelo y de las métricas
     algoritmo = pipeline_model.named_steps["regressor"].__class__.__name__
     columnas = [col_name.split("__")[1] for col_name in preprocessor.get_feature_names_out()]
     importance_scores = model.get_score(importance_type='gain')
     total_gain = np.array([v for k,v in importance_scores.items()]).sum()
     importancia = {k: v/total_gain for k, v in importance_scores.items()}
-    path = os.path.join(root_path, f"Modelos/potencia_inversor/Inversor_{inv_id - 20}/Nuevos/{algoritmo}-{pd.Timestamp.now()}/")
-    #path = os.path.join(root_path, f"Modelos/potencia_inversor/Inversor_{inv_id - 20}/Nuevos/normalizado_temp_iqr/")
+    path = os.path.join(root_path, f"Modelos/potencia_inversor_promedio/Inversor_{inv_id - 20}/Nuevos/{algoritmo}-{pd.Timestamp.now()}/")
     os.makedirs(path)
     with open(path+'model.model', "wb") as archivo_salida:
         pickle.dump(pipeline_model, archivo_salida)
-    
+
     # Cálculo de RMSE por rangos de irradiancia
     rad_bins = [0, 100, 250, 500, np.inf]
     rad_labels = ["0-100", "100-250", "250-500", "500+"]
@@ -506,7 +496,7 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
 
     plt.figure(figsize=(12, 8))
     plt.tight_layout()
-    sns.heatmap(train_df[perc_attr + std_attr + y.columns.tolist()].corr(), annot=True, fmt=".2f", cmap="coolwarm")
+    sns.heatmap(train_df[perc_attr + std_attr + norm_attr + y.columns.tolist()].corr(), annot=True, fmt=".2f", cmap="coolwarm")
     plt.xticks(rotation=45)
     plt.title("Matriz de correlación")
     plt.savefig(path + "correlacion.png")
@@ -554,6 +544,7 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
         informe = {"normalizacion": normalizacion,
                     "optimizacion": optimizacion,
                     "por_fases": stage,
+                    "intervalo_min": intervalo_min,
                     "metricas": metricas,
                     "metricas_rad": rmse_rad,
                     "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), key=lambda item: item[1], reverse=True)),
