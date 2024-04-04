@@ -74,6 +74,7 @@ if __name__ == "__main__":
                             VALUES(%s, %s, %s, %s, %s, %s);""", 
                             tuple(attr for attr in dispositivo.values[0]))
             conn.commit()
+            
         # Descarte de parámetros redundantes (relativos a la tabla parque o dispositivos)
         ree_df = ree_df.drop(columns = ["descripcion_parque", 
                             "localizacion_parque",
@@ -88,7 +89,7 @@ if __name__ == "__main__":
         try:
             dtypes_ree = {
                 'id': sqlalchemy.types.INTEGER(),
-                'parque_id': sqlalchemy.types.INTEGER(),
+                #'parque_id': sqlalchemy.types.INTEGER(),
                 'dispositivo_id': sqlalchemy.types.SMALLINT(),
                 'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
                 'med_id': sqlalchemy.types.INTEGER(),
