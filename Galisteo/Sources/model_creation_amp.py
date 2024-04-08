@@ -25,6 +25,7 @@ from sklearn.metrics import mean_squared_error as mse, \
 from sklearn.base import BaseEstimator, TransformerMixin
 from tqdm import tqdm
 import gc
+import time
 
 def discriminador(row):
     mean = np.mean(row)
@@ -78,10 +79,9 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
             params['max_depth'] = int(params['max_depth'])
         if 'min_child_weight' in params:
             params['min_child_weight'] = max(1, int(params['min_child_weight']))
-        print
-        cv_result = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = n_estimators, early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
-        score = cv_result['test-rmse-mean'].min()
-        return {'loss': score, 'status': STATUS_OK}
+
+        cv_results = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = n_estimators, early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
+        return {'loss': cv_results['test-rmse-mean'].min(), 'status': STATUS_OK, 'n_rounds': cv_results.shape[0]}
         
     def optimize(self, X, y, space, cv_folds, gamma_algo = 1, STALL_LIMIT = 5, MAX_EVALS_PER_RUN = 250):
         for col in tqdm(range(y.shape[1]), total = y.shape[1]):
@@ -89,15 +89,11 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
                 space.update(self.params[col])
             train_set = xgb.DMatrix(X, label=y[:, col])
             trials = Trials()
-            TOTAL_EVALS = len(trials.trials)
-            STALL_LIMIT = STALL_LIMIT
-            MAX_EVALS_PER_RUN = MAX_EVALS_PER_RUN
             best_loss = np.inf
             stall_counter = 0
-            num_evals = TOTAL_EVALS
-            run_counter = 0
+            num_evals = 0
             upper_limit = (MAX_EVALS_PER_RUN * (STALL_LIMIT - 1)) * 10
-            while stall_counter < STALL_LIMIT and num_evals < TOTAL_EVALS + upper_limit:
+            while stall_counter < STALL_LIMIT and num_evals < upper_limit:
                 best = fmin(fn=lambda space: self.objective(space, train_set = train_set, cv_folds = cv_folds), 
                         space = space, 
                         algo = partial(tpe.suggest, gamma = gamma_algo),
@@ -107,17 +103,13 @@ class MultiOutputOpt(BaseEstimator, TransformerMixin):
                 best_params = space_eval(space, best)  # Obtener los parámetros óptimos en su forma original
                 new_loss = trials.best_trial['result']['loss']
                 if new_loss < best_loss:
-                    threshold = 0.001
-                    if abs(new_loss - best_loss) <= threshold:
-                        stall_counter += 1
-                    else:
-                        stall_counter = 0
                     best_loss = new_loss
+                    stall_counter = 0
                 else:
                     stall_counter += 1
                 num_evals += MAX_EVALS_PER_RUN
-                run_counter += 1
-                gamma_algo -= 0.05
+                gamma_algo = max(0.25, gamma_algo - (0.5/STALL_LIMIT))
+            best_params["n_estimators"] = trials.best_trial['result']['n_rounds']
             print(f"\tEntrenamiento para entrada {col+1} finalizado")
             print(f"\tNúmero de evaluaciones realizadas: {num_evals}")
             print(f"\tBest params: {best_params}")
@@ -414,20 +406,6 @@ del target_df
 gc.collect()
 print(f"Registros descartados por corriente negativa: {n_corriente_neg}")
 
-# # Búsqueda de outliers basándose en la potencia activa y la potencia solar
-# num_strings_inv = f"""SELECT dispositivo_id, SUM(num_strings) as num_strings 
-#                         FROM {schema_name}.distrib_inversores
-#                         GROUP BY dispositivo_id;"""
-# num_strings_inv = pd.read_sql_query(num_strings_inv, engine).sort_values(by="dispositivo_id")
-# potencia_df = pd.merge(main_df.reset_index()[["dispositivo_id", "datetime_utc", "potencia_act", "rad_poa"]], num_strings_inv, on="dispositivo_id").set_index(["dispositivo_id", "datetime_utc"])
-# potencia_df["potencia_solar"] = potencia_df["rad_poa"] * potencia_df["num_strings"] * num_mod_string * sup_mod
-# potencia_df["outlier_solar"] = np.where(potencia_df["potencia_act"] > 0.20 * potencia_df["potencia_solar"], True, False)
-# main_df = main_df.merge(potencia_df[["outlier_solar"]], left_index=True, right_index=True, how="inner")
-# print(f"Registros descartados por outlier de potencia: {main_df[main_df['outlier_solar'] == True].shape[0]}")
-# main_df = main_df[main_df["outlier_solar"] == False].drop(columns = ["outlier_solar"])
-# del potencia_df, num_strings_inv
-# gc.collect()
-
 # Manipulación de variables meteorológicas
 main_df["rad_diff"] = (main_df["rad_celda1"] - main_df["rad_celda2"]) / main_df["rad_celda1"]
 main_df["temp_panel"] = (((main_df["temp_panel1"] + main_df["temp_panel2"]) / 2)) - main_df["temp_amb"]
@@ -460,7 +438,7 @@ main_df[['cloud_impact']] = main_df[['cloud_impact']].apply(lambda x: x/100)
 
 for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique()):
     # Carga del modelo de potencia y umbrales de radiación
-    print(f"Dispositivo {inv_id}")
+    print(f"\nDispositivo {inv_id}")
     power_model = power_models[f"Inversor_{inv_id-20}"]["model"]
     metricas_rad = power_models[f"Inversor_{inv_id-20}"]["RMSE_rad"]
     
@@ -523,15 +501,34 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
                                 remainder='passthrough')
     X_prep = preprocessor.fit_transform(X)
 
-    dtrain = xgb.DMatrix(X_prep, label=y)
-    params = {
-        'objective': 'reg:squarederror',
-        'tree_method': "hist",
-        'multi_strategy': "multi_output_tree",
-        'random_state': 42,
-        'n_jobs': -1
-    }
-    multioutput_model = xgb.train(params, dtrain) 
+    if optimizacion:
+        start_time = time.time()
+        print("\tOptimización de los hiperparámetros")
+        space = {'n_estimators': hp.quniform('n_estimators', 100, 3000, 5),
+                    'learning_rate': hp.uniform('learning_rate', 0.001, 0.2),
+                    'max_depth': hp.quniform("max_depth", 3, 30, 1),
+                    'gamma': hp.uniform ('gamma', 0, 25),
+                    'min_child_weight' : hp.quniform('min_child_weight', 1, 30, 1),
+                    'subsample' : hp.uniform('subsample', 0.4, 1),
+                    'reg_alpha' : hp.uniform('reg_alpha', 0, 50),
+                    'reg_lambda' : hp.uniform('reg_lambda', 0, 50)}
+        multioutput_model = MultiOutputOpt(model_class=XGBRegressor, device=device)
+        multioutput_model.optimize(X_prep, y.values, space = space, cv_folds = 5, STALL_LIMIT = 10, MAX_EVALS_PER_RUN = 100)
+    else:
+        if model_name == "XGBRegressor":
+            dtrain = xgb.DMatrix(X_prep, label=y)
+            params = {
+                'objective': 'reg:squarederror',
+                'tree_method': "hist",
+                'multi_strategy': "multi_output_tree",
+                'random_state': 42,
+                'n_jobs': -1
+            }
+            multioutput_model = xgb.train(params, dtrain) 
+
+        else:
+            print("Modelo no reconocido")
+            sys.exit()
 
     pipeline_model = Pipeline([('preprocessor', preprocessor),
                             ('regressor', multioutput_model)])

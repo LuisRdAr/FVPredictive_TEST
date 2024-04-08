@@ -41,7 +41,7 @@ def objective(space, train_set, cv_folds):
         params['min_child_weight'] = max(1, int(params['min_child_weight']))
 
     cv_results = xgb.cv(params, train_set, nfold = cv_folds, num_boost_round = n_estimators, early_stopping_rounds = 100, metrics = 'rmse', as_pandas = True)
-    return {'loss': cv_results['test-rmse-mean'].min(), 'status': STATUS_OK}
+    return {'loss': cv_results['test-rmse-mean'].min(), 'status': STATUS_OK, 'n_rounds': cv_results.shape[0]}
 
 def discriminador(row):
     mean = np.mean(row)
@@ -74,8 +74,10 @@ def optimize_hyperparameters(space, dtrain, STALL_LIMIT = 5, MAX_EVALS_PER_RUN =
         num_evals += MAX_EVALS_PER_RUN
         gamma_algo = max(0.25, gamma_algo - 0.05)
 
+    best_params["n_estimators"] = trials.best_trial['result']['n_rounds']
     print(f"\tNúmero de evaluaciones realizadas: {num_evals}")
     print(f"\tBest params: {best_params}")
+    print(f"\tBest trial: {trials.best_trial}")
     print(f"\tBest loss: {best_loss}", end="\n\n")
 
     return best_params
@@ -412,7 +414,7 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
                     'subsample' : hp.uniform('subsample', 0.4, 1),
                     'reg_alpha' : hp.uniform('reg_alpha', 0, 50),
                     'reg_lambda' : hp.uniform('reg_lambda', 0, 50)}
-            best_params = optimize_hyperparameters(space, dtrain, STALL_LIMIT = 10, MAX_EVALS_PER_RUN = 250, cv_folds = 10)
+            best_params = optimize_hyperparameters(space, dtrain, STALL_LIMIT = 10, MAX_EVALS_PER_RUN = 250, cv_folds = 10, verbose = True)
         end_time = time.time()
         execution_time = end_time - start_time
         execution_hours = int(execution_time // 3600)
