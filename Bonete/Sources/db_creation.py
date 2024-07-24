@@ -99,8 +99,8 @@ if __name__ == "__main__":
             except psycopg2.errors.UniqueViolation:
                 pass
         else:
-	        print("Esquema inválido")
-	        sys.exit()
+	    print("Esquema inválido")
+	    sys.exit()
         
         ########################################
         # CREACIÓN TABLA PARA LOS DISPOSITIVOS #

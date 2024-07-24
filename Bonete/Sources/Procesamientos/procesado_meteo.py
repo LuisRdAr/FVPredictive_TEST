@@ -25,12 +25,10 @@ import datetime as dt
 
 
 def abnormal_daily_behaviour(df, attr):
-    mean = attr[0]
-    max = attr[1]
-    count = attr[2]
+    mean, max_val, count = attr
     
-    day_df = df[df["daylight"] == True]
-    night_df = df[df["daylight"] == False]
+    day_df = df[df["daylight"]]
+    night_df = df[~df["daylight"]]
     # Se crea una instancia de KMeans y ajusta el modelo sobre el conjunto de datos medios durante el día
     kmeans = KMeans(n_clusters=2, n_init=10, random_state=0)
     day_df["comp_group"] = kmeans.fit_predict(day_df[[mean]])
@@ -39,8 +37,8 @@ def abnormal_daily_behaviour(df, attr):
     devices_group_0 = day_df[day_df["comp_group"] == 0]["dispositivo_id"].unique()
     devices_group_1 = day_df[day_df["comp_group"] == 1]["dispositivo_id"].unique()
 
-    max_group_0 = df[df["dispositivo_id"].isin(devices_group_0)][max].max()
-    max_group_1 = df[df["dispositivo_id"].isin(devices_group_1)][max].max()
+    max_group_0 = df[df["dispositivo_id"].isin(devices_group_0)][max_val].max()
+    max_group_1 = df[df["dispositivo_id"].isin(devices_group_1)][max_val].max()
     
     mean_group_0_day = day_df[day_df["dispositivo_id"].isin(devices_group_0)][mean].mean()
     mean_group_1_day = day_df[day_df["dispositivo_id"].isin(devices_group_1)][mean].mean()
@@ -50,21 +48,19 @@ def abnormal_daily_behaviour(df, attr):
 
     # Asignación de la etiqueta de fallo a los dispositivos en función del comportamiento de los grupos
     if max_group_0 > 1750:
-        day_df["failure"] = np.where(day_df["comp_group"] == 0, True, False)
+        day_df["failure"] = day_df["comp_group"] == 0
     elif max_group_1 > 1750:
-        day_df["failure"] = np.where(day_df["comp_group"] == 1, True, False)
+        day_df["failure"] = day_df["comp_group"] == 1
     elif mean_group_0_night > 1:
-        day_df["failure"] = np.where(day_df["comp_group"] == 0, True, False)
+        day_df["failure"] = day_df["comp_group"] == 0
     elif mean_group_1_night > 1:
-        day_df["failure"] = np.where(day_df["comp_group"] == 1, True, False)
-    elif mean_group_0_night > 1 and mean_group_1_night > 1 and mean_group_0_night > mean_group_1_night:
-        day_df["failure"] = np.where(day_df["comp_group"] == 0, True, False)
-    elif mean_group_0_night > 1 and mean_group_1_night > 1 and mean_group_0_night < mean_group_1_night:
-        day_df["failure"] = np.where(day_df["comp_group"] == 1, True, False)
+        day_df["failure"] = day_df["comp_group"] == 1
+    elif mean_group_0_night > 1 and mean_group_1_night > 1:
+        day_df["failure"] = mean_group_0_night > mean_group_1_night
     elif mean_group_0_day > mean_group_1_day:
-        day_df["failure"] = np.where(day_df["comp_group"] == 1, True, False)
+        day_df["failure"] = day_df["comp_group"] == 1
     else:
-        day_df["failure"] = np.where(day_df["comp_group"] == 0, True, False)
+        day_df["failure"] = day_df["comp_group"] == 0
 
     return day_df[["failure"]]
 
@@ -104,8 +100,7 @@ if __name__ == "__main__":
     # Carga de las coordenadas gps del parque e instanciación del objeto pvlib.location para obtener la posición del Sol
     consulta_sql = f"""SELECT latitud, longitud FROM {schema_name}.parques;"""
     gps = pd.read_sql_query(consulta_sql, engine).values[0]
-    lat = gps[0]
-    lon = gps[1]
+    lat, lon = gps
     parque = pvlib.location.Location(latitude=lat, longitude=lon, tz="Europe/Madrid")
 
     # Carga de los modelos para estimación de las irradiancias esperadas
@@ -178,15 +173,12 @@ if __name__ == "__main__":
                                                     freq="30s", 
                                                     tz="utc"))[["elevation", "azimuth"]]
         rad_df = pd.merge(rad_df, solar_position, left_on = "datetime_utc", right_index = True, how = "inner")
-        rad_df["daylight"] = np.where((rad_df["datetime_utc"] >= rad_df["sunrise"]) & 
-                                              (rad_df["datetime_utc"] < rad_df["sunset"]),
-                                        True,
-                                        False)
+        rad_df["daylight"] = (rad_df["datetime_utc"] >= rad_df["sunrise"]) & (rad_df["datetime_utc"] < rad_df["sunset"])
 
         # Clasificación de los días donde al menos uno de los piranómetros no funcione correctamente
         # Se calcula el coeficiente de variación de las irradiancias para cada instante y se agrupa para obtener el 
         # comportamiento diario de este. A partir de las medias y desviaciones se clusteriza en dos grupos.
-        dt_agg_df = rad_df[rad_df["daylight"] == True].groupby([rad_df["datetime_utc"]])[["rad_poa", "rad_hor"]].agg({"mean", "std"})
+        dt_agg_df = rad_df[rad_df["daylight"]].groupby([rad_df["datetime_utc"]])[["rad_poa", "rad_hor"]].agg({"mean", "std"})
         dt_agg_df.columns = ['_'.join(col).strip() for col in dt_agg_df.columns.values]
         dt_agg_df["rad_poa_coef_var"] = np.where(dt_agg_df["rad_poa_std"] != 0,dt_agg_df["rad_poa_std"]/dt_agg_df["rad_poa_mean"], 0)
         dt_agg_df["rad_hor_coef_var"] = np.where(dt_agg_df["rad_hor_std"] != 0,dt_agg_df["rad_hor_std"]/dt_agg_df["rad_hor_mean"], 0)
@@ -399,5 +391,5 @@ if __name__ == "__main__":
     cur.close()
     conn.close()
     print("Número de registros con etiquetado por anomalía en el rango: ", prep_meteo_df[(prep_meteo_df["status_srl"] == 2) | (prep_meteo_df["status_srl"] == 3)].shape[0])
-    print("Número de registros con etiquetado por malfuncionamiento de piranómetro: ", prep_meteo_df[(prep_meteo_df["status_srl"] == 1)])
+    print("Número de registros con etiquetado por malfuncionamiento de piranómetro: ", prep_meteo_df[(prep_meteo_df["status_srl"] == 1)].shape[0])
     print("Número de registros cargados inicialmente: ", count)

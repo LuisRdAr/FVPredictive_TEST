@@ -18,13 +18,15 @@ def procesar_directorio(initial_path, cadena):
     df = pd.DataFrame()
     for filename in os.listdir(initial_path):
         complete_path = os.path.join(initial_path, filename)
-        if (os.path.isfile(complete_path)) and (cadena in filename):
-            csv_path = os.path.join(initial_path, filename)
-            temp_df = pd.read_csv(csv_path, delimiter = ",")
-            df = pd.concat([df, temp_df])
-            if not os.path.exists(initial_path.replace("Nuevos", "Procesados")):
-                os.makedirs(initial_path.replace("Nuevos", "Procesados"))
-            shutil.move(csv_path, csv_path.replace("Nuevos", "Procesados"))
+        if (os.path.isdir(complete_path)) and (cadena in filename):
+            for internal_filename in os.listdir(complete_path):
+                if internal_filename.endswith(".csv"):
+                    csv_path = os.path.join(complete_path, internal_filename)
+                    temp_df = pd.read_csv(csv_path, delimiter = ";")
+                    df = pd.concat([df, temp_df])
+                    if not os.path.exists(complete_path.replace("Nuevos", "Procesados")):
+                        os.makedirs(complete_path.replace("Nuevos", "Procesados"))
+                    shutil.move(csv_path, csv_path.replace("Nuevos", "Procesados"))   
         elif (os.path.isdir(complete_path)):
             partial_df = procesar_directorio(complete_path, cadena)
             if not partial_df.empty:
@@ -66,7 +68,10 @@ if __name__ == "__main__":
                 df[column] = df[column].astype(int)
         except Exception as e:
             pass
-        columns.append(column.strip().replace(" ", "_").lower())
+        if "(i.)" in column:
+            columns.append(column[:-4].strip().replace(" ", "_").lower())
+        else:
+            columns.append(column.strip().replace(" ", "_").lower())
     df.columns = columns
 
     # Parseo de fechas y ordenación del dataframe
@@ -74,9 +79,6 @@ if __name__ == "__main__":
         if ('date' in column.lower()):
             df[column] = pd.to_datetime(df[column], utc=True)
             df = df.rename(columns = {column: "datetime_utc", "device_id": "dispositivo_id"})
-
-    # Descarte de registros anteriores a 2021
-    df = df[df["datetime_utc"].dt.year >= 2021]
 
     # Conexión a la base de datos y carga de datos
     try:
@@ -105,17 +107,27 @@ if __name__ == "__main__":
     # Ordenación del dataframe por fecha y dispositivo
     df = df.sort_values(by = ["datetime_utc", "dispositivo_id"])\
             .reset_index(drop = True)
-    
-    # Asignación de id de parque
-    df["parque_id"] = 1
 
     # Volcado del dataframe en la base de datos
     try:
-        df = df.rename(columns={"rad_cel1": "rad_celda1", 
+        df = df.rename(columns={
+                            "descripcion": "descripcion_parque", 
+                            "localizacion": "localizacion_parque", 
+                            "nombre": "nombre_dispositivo", 
+                            "descripcion.1": "descripcion_dispositivo", 
+                            "rad_cel1": "rad_celda1", 
                             "rad_cel2": "rad_celda2"})
         dtypes = {
             'parque_id': sqlalchemy.types.SMALLINT(),
+            'descripcion_parque': sqlalchemy.types.VARCHAR(length=25),
+            'localizacion_parque': sqlalchemy.types.VARCHAR(length=25),
+            'potencia_max': sqlalchemy.types.Float(precision=3, asdecimal=True),
+            'num_paneles': sqlalchemy.types.Float(precision=3, asdecimal=True),
             'dispositivo_id': sqlalchemy.types.SMALLINT(),
+            'nombre_dispositivo': sqlalchemy.types.VARCHAR(length=25),
+            'ref': sqlalchemy.types.VARCHAR(length=25),
+            'ubicacion': sqlalchemy.types.VARCHAR(length=25),
+            'descripcion_dispositivo': sqlalchemy.types.VARCHAR(length=25),
             'datetime_utc': sqlalchemy.types.DateTime(timezone=True),
             'med_id': sqlalchemy.types.INTEGER(),
             'status': sqlalchemy.types.Float(precision=3, asdecimal=True),
