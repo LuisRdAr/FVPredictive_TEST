@@ -99,8 +99,8 @@ if __name__ == "__main__":
             except psycopg2.errors.UniqueViolation:
                 pass
         else:
-	   print("Esquema inválido")
-	   sys.exit()
+	        print("Esquema inválido")
+	        sys.exit()
         
         ########################################
         # CREACIÓN TABLA PARA LOS DISPOSITIVOS #
@@ -305,6 +305,7 @@ if __name__ == "__main__":
                 azimuth REAL,
                 cloud_impact REAL,
                 daylight BOOLEAN,
+                status_srl SMALLINT,
                 FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
@@ -495,3 +496,66 @@ if __name__ == "__main__":
                 datetime_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 y_pred REAL,
                 FOREIGN KEY (id) REFERENCES {schema_name}.inversores(id));""")
+
+        #####################################################
+        # CREACIÓN TABLA ESTADÍSTICA HISTÓRICA DE AMPERAJES #
+        #####################################################
+        cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {schema_name}.historico_stats(
+                        id SERIAL PRIMARY KEY,
+                        rad_bins VARCHAR(50) NOT NULL,
+                        cloud_bins VARCHAR(50) NOT NULL,
+                        consigna_cat VARCHAR(50) NOT NULL,
+                        dispositivo_id VARCHAR(50) NOT NULL,
+                        mes INT NOT NULL CHECK (mes BETWEEN 1 AND 12),
+                        media_amp NUMERIC NOT NULL,
+                        mediana_amp NUMERIC NOT NULL,
+                        std_amp NUMERIC NOT NULL,
+                        media_pot NUMERIC NOT NULL,
+                        mediana_pot NUMERIC NOT NULL,
+                        std_pot NUMERIC NOT NULL,
+                        UNIQUE (rad_bins, cloud_bins, consigna_cat, dispositivo_id, mes)
+                        );""")
+        cur.execute(
+                f"""CREATE INDEX IF NOT EXISTS idx_historico_stats_rad_bins
+                        ON {schema_name}.historico_stats(rad_bins);
+                CREATE INDEX IF NOT EXISTS idx_historico_stats_cloud_bins
+                        ON {schema_name}.historico_stats(cloud_bins);
+                CREATE INDEX IF NOT EXISTS idx_historico_stats_consigna_cat
+                        ON {schema_name}.historico_stats(consigna_cat);
+                CREATE INDEX IF NOT EXISTS idx_historico_stats_dispositivo_id
+                        ON {schema_name}.historico_stats(dispositivo_id);
+                CREATE INDEX IF NOT EXISTS idx_historico_stats_mes
+                        ON {schema_name}.historico_stats(mes);
+                CREATE INDEX IF NOT EXISTS idx_categorias_mes 
+                        ON {schema_name}.historico_stats(rad_bins, cloud_bins, consigna_cat, dispositivo_id, mes);""")
+        
+        ###########################################
+        # CREACIÓN TABLA PARA LIMITES DEL PLATEAU #
+        ###########################################
+        cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {schema_name}.plateau(
+                        month INT PRIMARY KEY,
+                        plateau_start TIMESTAMP WITH TIME ZONE,
+                        plateau_end TIMESTAMP WITH TIME ZONE
+                        );""")
+        
+        ##############################
+        # CREACIÓN TABLA PARA FALLOS #
+        ##############################
+        cur.execute(
+             f"""CREATE TABLE IF NOT EXISTS {schema_name}.incidencias(
+                        id_fallo SERIAL PRIMARY KEY,
+                        parque_id SMALLINT,
+                        dispositivo_id SMALLINT,
+                        codigo_error VARCHAR(20),
+                        inicio TIMESTAMP WITH TIME ZONE,
+                        ultima_actualizacion TIMESTAMP WITH TIME ZONE,
+                        fin TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+                        abierta BOOLEAN DEFAULT TRUE,
+                        FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_abierta ON {schema_name}.incidencias(abierta);
+                """
+                )
