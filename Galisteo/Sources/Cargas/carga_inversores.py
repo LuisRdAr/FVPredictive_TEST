@@ -9,9 +9,10 @@ import shutil
 
 def procesar_directorio(initial_path, cadena):
     """
-    Busca mediante recursividad en el directorio inicial todos los directorios hasta encontrar un directorio que contenga
-    la cadena de texto "cadena". Una vez encontrado, busca en el directorio todos los ficheros .csv y los concatena en un
-    único dataframe. Por último, mueve el directorio encontrado a la carpeta "Procesados" y devuelve el dataframe.
+    Busca mediante recursividad en el directorio inicial todos los directorios hasta encontrar un 
+    directorio que contenga la cadena de texto "cadena". Una vez encontrado, busca en el directorio 
+    todos los ficheros .csv y los concatena en un único dataframe. Por último, mueve el directorio 
+    encontrado a la carpeta "Procesados" y devuelve el dataframe.
     """
     df = pd.DataFrame()
     for filename in os.listdir(initial_path):
@@ -80,7 +81,9 @@ if __name__ == "__main__":
     # Conexión a la base de datos y carga de datos
     try:
         password = params['password'].replace('@', '%40')
-        engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
+        engine_string = f'postgresql://{params["user"]}:{password}' + \
+                    f'@{params["host"]}:{params["port"]}/{params["dbname"]}'
+        engine = create_engine(engine_string)
         print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
     except Exception as error:
         print("Error en la apertura de base de datos: \n\t{}".format(error))
@@ -91,18 +94,24 @@ if __name__ == "__main__":
     df = df.dropna(subset = ["pot_act"])
 
     num_duplicates = df[df.duplicated(subset = ["datetime_utc", "dispositivo_id"])].shape[0]
-    df = df.drop_duplicates(subset = ["datetime_utc", "dispositivo_id"], keep = "last").reset_index(drop = True)
+    df = df.drop_duplicates(subset = ["datetime_utc", "dispositivo_id"], 
+                            keep = "last").reset_index(drop = True)
 
     # Comprobación de la existencia de registros duplicados en la base de datos
     check_query = f"SELECT datetime_utc, dispositivo_id FROM {schema_name}.inversores_raw"
     check_df = pd.read_sql_query(check_query, engine)
     check_df["datetime_utc"] = pd.to_datetime(check_df["datetime_utc"], utc=True)
-    merged_df = df.merge(check_df, how='left', indicator=True, left_on = ["datetime_utc", "dispositivo_id"], right_on = ["datetime_utc", "dispositivo_id"])
+    merged_df = df.merge(check_df, 
+                         how='left', 
+                         indicator=True, 
+                         left_on = ["datetime_utc", "dispositivo_id"], 
+                         right_on = ["datetime_utc", "dispositivo_id"])
     df = merged_df[merged_df["_merge"] == "left_only"]
     df = df.drop(columns = "_merge")
     print(f"Se han encontrado {num_na_pot_act} registros con potencia activa nula")
     print(f"Se han encontrado {num_duplicates} registros duplicados")
-    print(f"Se han encontrado {merged_df.shape[0] - df.shape[0]} registros ya existentes en la base de datos")
+    print(f"Se han encontrado {merged_df.shape[0] - df.shape[0]}",
+          "registros ya existentes en la base de datos")
 
     # Ordenación del dataframe por fecha y dispositivo
     df = df.sort_values(by = ["datetime_utc", "dispositivo_id"])\
@@ -181,7 +190,13 @@ if __name__ == "__main__":
             'energia_dia': sqlalchemy.types.INTEGER()}
         keys = list(dtypes.keys())
         df = df.drop(columns=[col for col in df.columns if col not in keys])
-        df.to_sql('inversores_raw', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes, chunksize = 100000)
+        df.to_sql('inversores_raw', 
+                  engine, 
+                  if_exists = 'append', 
+                  index = False, 
+                  schema = schema_name, 
+                  dtype = dtypes, 
+                  chunksize = 100000)
 
     except Exception as error:
         print(f"Error en volcado del dataframe: \n\t{error}")

@@ -132,7 +132,8 @@ if __name__ == "__main__":
                 potencia_mod VARCHAR(10),
                 potencia INTEGER,
                 PRIMARY KEY (parque_id, dispositivo_id, entrada_id),
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id));""")
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id));""")
         
         ##############################################################
         # CREACIÓN TABLA PARA LAS MEDIDAS EN BRUTO DE LOS INVERSORES #
@@ -226,7 +227,8 @@ if __name__ == "__main__":
                 vol_dc_bus REAL,
                 aisl_dc INTEGER,
                 energia_dia INTEGER,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ###################################################################
@@ -306,7 +308,8 @@ if __name__ == "__main__":
                 cloud_impact REAL,
                 daylight BOOLEAN,
                 status_srl SMALLINT,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ##################################################################
@@ -365,7 +368,8 @@ if __name__ == "__main__":
                 amp_2 REAL,
                 amp_3 REAL,
                 frec REAL,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         #########################################################
@@ -414,7 +418,8 @@ if __name__ == "__main__":
                 energia_rea_q2 REAL,
                 energia_rea_q3 REAL,
                 energia_rea_q4 REAL,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
         
         ###################################################
@@ -463,7 +468,8 @@ if __name__ == "__main__":
                 consigna_pot_act_planta REAL,
                 consigna_fdp_ree REAL,
                 consigna_fdp_planta REAL,
-                FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
+                FOREIGN KEY (parque_id, dispositivo_id) 
+                        REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id),
                 UNIQUE(datetime_utc, parque_id, dispositivo_id));""")
 
         ################################
@@ -508,12 +514,10 @@ if __name__ == "__main__":
                         consigna_cat VARCHAR(50) NOT NULL,
                         dispositivo_id VARCHAR(50) NOT NULL,
                         mes INT NOT NULL CHECK (mes BETWEEN 1 AND 12),
-                        media_amp NUMERIC NOT NULL,
-                        mediana_amp NUMERIC NOT NULL,
-                        std_amp NUMERIC NOT NULL,
-                        media_pot NUMERIC NOT NULL,
-                        mediana_pot NUMERIC NOT NULL,
-                        std_pot NUMERIC NOT NULL,
+                        lower_amp NUMERIC NOT NULL,
+                        upper_amp NUMERIC NOT NULL,
+                        lower_pot NUMERIC NOT NULL,
+                        upper_pot NUMERIC NOT NULL,
                         UNIQUE (rad_bins, cloud_bins, consigna_cat, dispositivo_id, mes)
                         );""")
         cur.execute(
@@ -528,7 +532,11 @@ if __name__ == "__main__":
                 CREATE INDEX IF NOT EXISTS idx_historico_stats_mes
                         ON {schema_name}.historico_stats(mes);
                 CREATE INDEX IF NOT EXISTS idx_categorias_mes 
-                        ON {schema_name}.historico_stats(rad_bins, cloud_bins, consigna_cat, dispositivo_id, mes);""")
+                        ON {schema_name}.historico_stats(rad_bins, 
+                                                        cloud_bins, 
+                                                        consigna_cat, 
+                                                        dispositivo_id, 
+                                                        mes);""")
         
         ###########################################
         # CREACIÓN TABLA PARA LIMITES DEL PLATEAU #
@@ -553,7 +561,8 @@ if __name__ == "__main__":
                         ultima_actualizacion TIMESTAMP WITH TIME ZONE,
                         fin TIMESTAMP WITH TIME ZONE DEFAULT NULL,
                         abierta BOOLEAN DEFAULT TRUE,
-                        FOREIGN KEY (parque_id, dispositivo_id) REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id)
+                        FOREIGN KEY (parque_id, dispositivo_id) 
+                                REFERENCES {schema_name}.dispositivos(parque_id, dispositivo_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_abierta ON {schema_name}.incidencias(abierta);
