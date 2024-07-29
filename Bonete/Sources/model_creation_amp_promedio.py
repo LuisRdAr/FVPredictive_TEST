@@ -21,6 +21,10 @@ from functools import partial
 from sklearn.metrics import mean_squared_error as mse, \
                             mean_absolute_error as mae, \
                             r2_score as r2
+from sklearn.experimental import enable_iterative_imputer  # Necesario para activar IterativeImputer
+from sklearn.impute import IterativeImputer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.exceptions import ConvergenceWarning
 import time
 import gc
 
@@ -164,13 +168,16 @@ while repeat:
                     DEVICE = "cpu"
         STALL_LIMIT = 0
         while STALL_LIMIT < 1 or STALL_LIMIT > 11:
-            STALL_LIMIT = int(input("Introduzca el limite de bloques de iteraciones sin mejora (2-10): "))
+            STALL_LIMIT = input("Introduzca el limite de bloques de iteraciones sin mejora (2-10): ")
+            STALL_LIMIT = int(STALL_LIMIT)
         MAX_EVALS_PER_RUN = 0
         while MAX_EVALS_PER_RUN < 10 or MAX_EVALS_PER_RUN > 251:
-            MAX_EVALS_PER_RUN = int(input("Introduzca el numero de evaluaciones por bloque (10-250): "))
+            MAX_EVALS_PER_RUN = input("Introduzca el numero de evaluaciones por bloque (10-250): ")
+            MAX_EVALS_PER_RUN = int(MAX_EVALS_PER_RUN)
         CV_FOLDS = 0
         while CV_FOLDS < 2 or CV_FOLDS > 11:
-            CV_FOLDS = int(input("Introduzca el numero de folds para la validacion cruzada (2-10): "))
+            CV_FOLDS = input("Introduzca el numero de folds para la validacion cruzada (2-10): ")
+            CV_FOLDS = int(CV_FOLDS)
     else:
         DEVICE = 'cpu'
 
@@ -194,7 +201,6 @@ print("Configuracion establecida", end="\n\n")
 
 # Carga del fichero de parametros para conexion con la base de datos
 ROOT_PATH = os.getcwd()
-ROOT_PATH = "/home/upo/Desktop/Test_FVPredictive/FVPredictive_TEST/Bonete"
 params = None
 for filename in os.listdir(ROOT_PATH):
     if "params.json" in filename:
@@ -206,10 +212,10 @@ if params is None:
 DATA_PATH = os.path.join(ROOT_PATH, params["data_path"])
 SCHEMA_NAME = params["schema"]
 
-password = params['password'].replace('@', '%40')
-engine = create_engine(
-    f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}'
-    )
+PASSWORD = params['password'].replace('@', '%40')
+ENGINE_STRING = f'postgresql://{params["user"]}:{PASSWORD}' + \
+                    f'@{params["host"]}:{params["port"]}/{params["dbname"]}'
+engine = create_engine(ENGINE_STRING)
 print(f"Conexion a la base de datos {params['dbname']} (esquema {SCHEMA_NAME}) establecida")
 
 
@@ -303,7 +309,7 @@ for chunk in chunks:
 del chunks, chunk
 gc.collect()
 
-# Normalizacion de la entrada de corriente continua, formateo de fechas y escalado de potencia (kW -> W)
+# Normalizacion de la entrada de corriente continua, formateo de fechas y escalado de potencia
 print(f"Carga inicial de {main_df.shape[0]} registros")
 print("Entrada de corriente continua normalizada segun el numero de strings")
 main_df["amp_dc"] = main_df["amp_dc"]/main_df["num_strings"]
@@ -322,17 +328,17 @@ stats_query = f"""
         consigna_cat,
         dispositivo_id,
         mes,
-        media_amp,
-        std_amp,
-        media_pot,
-        std_pot
+        lower_amp,
+        upper_amp,
+        lower_pot,
+        upper_pot
     FROM {SCHEMA_NAME}.historico_stats;"""
 stats = pd.read_sql(stats_query, engine)
 stats["mes"] = stats["mes"].astype(int)
 stats["consigna_cat"] = stats["consigna_cat"].astype(int)
 stats["dispositivo_id"] = stats["dispositivo_id"].astype(int)
-stats["media_pot"] = stats["media_pot"] * 1000
-stats["std_pot"] = stats["std_pot"] * 1000
+stats["lower_pot"] = stats["lower_pot"] * 1000
+stats["upper_pot"] = stats["upper_pot"] * 1000
 
 # Se carga en un diccionario una lista con las labels de los contenedores de irradiancia 
 # para cada mes. Con ellas se generan los contenedores de irradiancia en si para cada mes.
@@ -386,34 +392,34 @@ del stats
 
 # Se descartan los registros cuyas potencias y amperajes esten fuera del rango de la media 
 # mas/menos 3 desviaciones estandar.
-df_with_stats["stats_pot_outlier"] = np.where(df_with_stats["consigna_cat"] == 0,
-                                        np.where(np.abs(df_with_stats["potencia_act"] 
-                                                    - df_with_stats["media_pot"]) 
-                                                    > 3*df_with_stats["std_pot"], 
-                                                "1", 
-                                                "0"),
-                                        np.where(np.abs(df_with_stats["potencia_act"] 
-                                                    - (df_with_stats["media_pot"]
-                                                        /df_with_stats["consigna_pot_act_planta"])) 
-                                                    > 3*df_with_stats["std_pot"], 
-                                                "1", 
-                                                "0"))
+df_with_stats["stats_pot_outlier"] = \
+    np.where(df_with_stats["consigna_cat"] == 0,
+            np.where((df_with_stats["potencia_act"] < df_with_stats["lower_pot"]) |
+                        (df_with_stats["potencia_act"] > df_with_stats["upper_pot"]),
+                    "1", 
+                    "0"),
+            np.where((df_with_stats["potencia_act"] < \
+                            df_with_stats["lower_pot"] / df_with_stats["consigna_pot_act_planta"]) |
+                        (df_with_stats["potencia_act"] > \
+                            df_with_stats["upper_pot"] / df_with_stats["consigna_pot_act_planta"]),
+                    "1", 
+                    "0"))
 n_outliers_pot = df_with_stats["stats_pot_outlier"].astype(int).sum()
 print(f"\tNumero de outliers en potencia: {n_outliers_pot}")
 df_with_stats = df_with_stats[df_with_stats["stats_pot_outlier"] == "0"]
 
-df_with_stats["stats_amp_outlier"] = np.where(df_with_stats["consigna_cat"] == 0,
-                                        np.where(np.abs(df_with_stats["amp_dc"] 
-                                                    - df_with_stats["media_amp"])
-                                                    > 3*df_with_stats["std_amp"], 
-                                                "1", 
-                                                "0"),
-                                        np.where(np.abs(df_with_stats["amp_dc"] 
-                                                    - (df_with_stats["media_amp"]
-                                                       /df_with_stats["consigna_pot_act_planta"])) 
-                                                    > 3*df_with_stats["std_amp"], 
-                                                "1", 
-                                                "0"))
+df_with_stats["stats_amp_outlier"] = \
+    np.where(df_with_stats["consigna_cat"] == 0,
+            np.where(np.abs(df_with_stats["amp_dc"] < df_with_stats["lower_amp"]) |
+                            (df_with_stats["amp_dc"] > df_with_stats["upper_amp"]), 
+                    "1", 
+                    "0"),
+            np.where(np.abs(df_with_stats["amp_dc"] < \
+                            df_with_stats["lower_amp"] / df_with_stats["consigna_pot_act_planta"]) | 
+                        (df_with_stats["amp_dc"] > \
+                            df_with_stats["upper_amp"] / df_with_stats["consigna_pot_act_planta"]),
+                    "1", 
+                    "0"))
 n_outliers_amp = df_with_stats["stats_amp_outlier"].astype(int).sum()
 print(f"\tNumero de outliers en amperaje: {n_outliers_amp}")
 df_with_stats = df_with_stats[df_with_stats["stats_amp_outlier"] == "0"]
@@ -685,7 +691,8 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     ax.axvline(x = 0, color = 'black', linestyle = '--', linewidth = 0.35, label = 'x=0')
     ax.text(0.95, 
             0.95, 
-            f"Media: {round(prediction_df['y_diff'].mean(), 2)}\nDesviacion estandar: {round(prediction_df['y_diff'].std(), 2)}", 
+            f"Media: {round(prediction_df['y_diff'].mean(), 2)}" + \
+                f"\nDesviacion estandar: {round(prediction_df['y_diff'].std(), 2)}", 
             transform = ax.transAxes, 
             fontsize = 10, 
             verticalalignment = 'top', 
@@ -722,7 +729,7 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     rrmse_list = []
     hora_list = []
     for group in prediction_df.reset_index().groupby(["dispositivo_id", 
-                                                      prediction_df.reset_index()["datetime_utc"].dt.hour]):
+                                            prediction_df.reset_index()["datetime_utc"].dt.hour]):
         hora_list.append(group[0][1])
         rmse_score = round(mse(group[1]["amp_dc"], 
                                group[1]["y_pred"], 
@@ -808,17 +815,129 @@ for inv_id in np.sort(main_df.index.get_level_values("dispositivo_id").unique())
     plt.savefig(path + "rmse_entrada.png")
 
     target_unnormalized = y.reset_index().merge(num_strings, on="entrada_id")
-    target_unnormalized["amp_dc"] = target_unnormalized["amp_dc"] * target_unnormalized["num_strings"]
+    target_unnormalized["amp_dc"] = target_unnormalized["amp_dc"] \
+                                        * target_unnormalized["num_strings"]
+    
+    # Cálculo de intervalos de confianza para las predicciones
+    prediction_df = prediction_df.merge(main_df[["rad_poa", "cloud_bins"]], 
+                                        left_on = ["dispositivo_id", "datetime_utc"], 
+                                        right_index = True)
+    prediction_df["rad_bins"] = pd.cut(prediction_df["rad_poa"], 
+                                       bins=[-np.inf, 100, 250, 500, 750, np.inf], 
+                                       labels=["0-100", "100-250", "250-500", "500-750", "750+"])
+    cis = {}
+    percentiles = [10, 90]
+    path_hist = os.path.join(path, "histogramas_diferencias/")
+    os.makedirs(path_hist)
+    for n_group, group in enumerate(prediction_df.groupby(["rad_bins", "cloud_bins"])):
+        if group[1].shape[0] < 30:
+            continue
+        bootstrap_means = []
+        bootstrap_lower = []
+        bootstrap_upper = []
+        for _ in range(1000):
+            sample = group[1]["y_diff"].sample(frac=1, replace=True)
+            bootstrap_mean = sample.mean()
+            bootstrap_percentiles = np.percentile(sample, percentiles)
+            bootstrap_means.append(bootstrap_mean)
+            bootstrap_lower.append(bootstrap_percentiles[0])
+            bootstrap_upper.append(bootstrap_percentiles[1])
 
+        confidence_interval = [np.mean(bootstrap_lower), np.mean(bootstrap_upper)]
+        cis[group[0]] = confidence_interval
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        sns.histplot(group[1]["y_diff"], kde=True, stat='percent', bins=100)
+        plt.axvline(x = confidence_interval[0], color = 'black', linestyle = '--', linewidth = 0.35)
+        plt.axvline(x = confidence_interval[1], color = 'black', linestyle = '--', linewidth = 0.35)
+        plt.title("Distribucion de las diferencias entre valores reales y predichos \n Grupo: " + str(group[0]))
+        plt.xlabel("Diferencia")
+        plt.ylabel("Porcentaje")
+        plt.text(0.95,
+                0.95,
+                f"Media: {round(np.mean(bootstrap_means), 2)}" + \
+                f"\nLímite inferior: {round(confidence_interval[0], 2)}" + \
+                f"\nLímite superior: {round(confidence_interval[1], 2)}",
+                transform = plt.gca().transAxes,
+                fontsize = 10,
+                verticalalignment = 'top',
+                horizontalalignment = 'right',
+                bbox = dict(facecolor = 'white', alpha = 0.5))
+        plt.text(0.35,
+                0.95,
+                f"Ancho intervalo de confianza: {round(confidence_interval[1] - confidence_interval[0], 2)}" + \
+                    f"\nAncho intervalo inferior: {round(np.mean(bootstrap_means) - confidence_interval[0], 2)}" + \
+                    f"\nAncho intervalo superior: {round(confidence_interval[1] - np.mean(bootstrap_means), 2)}",
+                transform = plt.gca().transAxes,
+                fontsize = 10,
+                verticalalignment = 'top',
+                horizontalalignment = 'right',
+                bbox = dict(facecolor = 'white', alpha = 0.5))
+        plt.text(0.35,
+                0.85,
+                f"Número de registros: {group[1].shape[0]}",
+                transform = plt.gca().transAxes,
+                fontsize = 10,
+                verticalalignment = 'top',
+                horizontalalignment = 'right',
+                bbox = dict(facecolor = 'white', alpha = 0.5))
+        plt.savefig(path_hist + f"grupo_{n_group}.png")
+        plt.close()
+    
+    cis_df = pd.DataFrame(cis).T.reset_index().rename(columns={"level_0": "rad_bins", 
+                                                               "level_1": "cloud_bins", 
+                                                               0: "lower", 
+                                                               1: "upper"})
+    cis_master = pd.merge(pd.DataFrame(prediction_df["rad_bins"].unique(), columns=["rad_bins"]),
+                        pd.DataFrame(prediction_df["cloud_bins"].unique(), columns=["cloud_bins"]), 
+                        how = "cross").sort_values(by=["rad_bins", "cloud_bins"]) 
+    cis_df = cis_df.merge(cis_master, 
+                          on=["rad_bins", "cloud_bins"], 
+                          how="right")
+
+
+    rad_bins_mapping = {'0-100': 1, '100-250': 2, '250-500': 3, '500-750': 4, '750+': 5}
+    cloud_bins_mapping = {'0-20%': 1, '20-40%': 2, '40-60%': 3, '60-80%': 4, '80-100%': 5}
+
+    cis_df['rad_bins'] = cis_df['rad_bins'].map(rad_bins_mapping)
+    cis_df['cloud_bins'] = cis_df['cloud_bins'].map(cloud_bins_mapping)
+
+    # Crear el imputador iterativo
+    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+    imputer = IterativeImputer(estimator=RandomForestRegressor(), max_iter = 10, random_state=0)
+
+    # Aplicar la imputación
+    imputed_values = imputer.fit_transform(cis_df[['rad_bins', 'cloud_bins', 'lower', 'upper']])
+
+    # Restaurar los datos imputados al DataFrame original
+    cis_df[['rad_bins', 'cloud_bins', 'lower', 'upper']] = imputed_values
+
+    # Convertir las columnas de vuelta a las categorías originales
+    rad_bins_reverse_mapping = {v: k for k, v in rad_bins_mapping.items()}
+    cloud_bins_reverse_mapping = {v: k for k, v in cloud_bins_mapping.items()}
+
+    cis_df['rad_bins'] = cis_df['rad_bins'].map(rad_bins_reverse_mapping)
+    cis_df['cloud_bins'] = cis_df['cloud_bins'].map(cloud_bins_reverse_mapping)
+    cis_df['lower'] = cis_df['lower'].round(2)
+    cis_df['upper'] = cis_df['upper'].round(2)
+
+    cis = cis_df.to_dict(orient="records")
+
+    # Guardado de los resultados en un archivo JSON
     with open(path+'informe_modelo.json', 'w') as archivo_json:
         informe = {"optimizacion": OPTIMIZATION,
+                "bloques": STALL_LIMIT if OPTIMIZATION else None,
+                "evaluaciones_max": MAX_EVALS_PER_RUN if OPTIMIZATION else None, 
+                "folds": CV_FOLDS if OPTIMIZATION else None,
                 "intervalo_min": INTERVALO_MIN,
                 "metricas": metricas,
+                "percentiles_confianza": percentiles,
+                "intervalos_confianza": cis,
                 "feature_importance": dict(sorted({k:v for k,v in zip(columnas,importancia.values())}.items(), 
                                                     key=lambda item: item[1], 
                                                     reverse=True)),
                 "hiperparametros": {k:v for k,v in train_params.items() if v != None},
-                "training_input_description": train_df[perc_attr + std_attr].describe() \
+                "training_input_description": train_df[perc_attr + std_attr + norm_attr].describe() \
                                                     .loc[["mean", "std", "min", "max"]] \
                                                         .to_dict(),
                 "training_target_description": target_unnormalized["amp_dc"].describe().to_dict(),
