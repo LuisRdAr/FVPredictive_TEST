@@ -16,7 +16,9 @@ if __name__ == "__main__":
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
-    data_path = os.path.join(root_path, "Documentacion/Placas/Placas/Distribución Potencias por SCB - Galisteo.csv")
+    relative_path = "Documentacion/Placas/Placas/Distribución Potencias por SCB - Galisteo.csv"
+    data_path = os.path.join(root_path, 
+                             relative_path)
     schema_name = params["schema"]
 
     # Inicialización del dataframe y lectura del csv
@@ -58,8 +60,8 @@ if __name__ == "__main__":
                         num_modulos, potencia_mod, potencia)
                     VALUES 
                         (%s, %s, %s, %s, %s, %s, %s, %s, %s);""",
-                    (row.parque_id, row.subcampo, row.dispositivo_id, row.entrada_id, row.tipo, row.num_strings,
-                     row.num_modulos, row.potencia_mod, row.potencia))
+                    (row.parque_id, row.subcampo, row.dispositivo_id, row.entrada_id, row.tipo, 
+                     row.num_strings, row.num_modulos, row.potencia_mod, row.potencia))
                 conn.commit()
             except Exception as error:
                 print("Error: ", error)

@@ -253,19 +253,8 @@ main_query = f"""
             AVG((LEAST(cloud_impact, 100)/100)) AS cloud_impact
         FROM {SCHEMA_NAME}.meteo
             WHERE daylight = true
-                AND status_srl = 0
+                --AND status_srl = 0
         GROUP BY dispositivo_id, datetime_utc_rounded
-    ),
-    met_gr AS (
-        SELECT
-            datetime_utc_rounded,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rad_poa) AS rad_poa,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rad_soiling) AS rad_soiling,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY temp_amb) AS temp_amb,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY temp_panel) AS temp_panel,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cloud_impact) AS cloud_impact
-        FROM met
-        GROUP BY datetime_utc_rounded
     ),
     ree AS (
         SELECT
@@ -295,8 +284,11 @@ main_query = f"""
     JOIN {SCHEMA_NAME}.distrib_inversores dist
         ON dist.dispositivo_id = inv.dispositivo_id
             AND dist.entrada_id = inv.entrada_id
-    JOIN met_gr
-        ON met_gr.datetime_utc_rounded = inv.datetime_utc_rounded
+    JOIN {SCHEMA_NAME}.dispositivos AS disp
+        ON disp.dispositivo_id = inv.dispositivo_id
+    JOIN met
+        ON met.datetime_utc_rounded = inv.datetime_utc_rounded
+            AND met.dispositivo_id = disp.meteo_cercana_id
     JOIN ree
         ON ree.datetime_utc_rounded = inv.datetime_utc_rounded
     ORDER BY 4, 2, 3;"""

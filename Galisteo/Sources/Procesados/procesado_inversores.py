@@ -10,24 +10,26 @@ import os
 
 if __name__ == "__main__":
     # Carga, desde la ruta de ejecución, de los parámetros para conexión a la base de datos  
-    root_path = os.getcwd()
+    ROOT_PATH = os.getcwd()
     params = None
-    for filename in os.listdir(root_path):
+    for filename in os.listdir(ROOT_PATH):
         if "params.json" in filename:
-            with open(os.path.join(root_path, filename)) as f:
+            with open(os.path.join(ROOT_PATH, filename)) as f:
                 params = json.load(f)
     if params is None:
         print("No se ha encontrado el archivo de parámetros para la conexión a la base de datos")
         sys.exit()
     else:
         print(f"Parámetros de la planta {params['schema'].capitalize()} cargados correctamente")
-    data_path = os.path.join(root_path, params["data_path"])
-    schema_name = params["schema"]
+    data_path = os.path.join(ROOT_PATH, params["data_path"])
+    SCHEMA_NAME = params["schema"]
 
     # Conexión con la base de datos
     try:
-        password = params['password'].replace('@', '%40')
-        engine = create_engine(f'postgresql://{params["user"]}:{password}@{params["host"]}:{params["port"]}/{params["dbname"]}')
+        PASSWORD = params['password'].replace('@', '%40')
+        ENGINE_STRING = f'postgresql://{params["user"]}:{PASSWORD}' +  \
+            f'@{params["host"]}:{params["port"]}/{params["dbname"]}'
+        engine = create_engine(ENGINE_STRING)
         conn = psycopg2.connect(
             database = params['dbname'],
             user = params['user'],
@@ -35,22 +37,25 @@ if __name__ == "__main__":
             host = params['host'],  
             port = params['port'])
         cur = conn.cursor()
-        print(f"Conexión a la base de datos {params['dbname']} (esquema {schema_name}) establecida")
+        print(f"Conexión a la base de datos {params['dbname']} (esquema {SCHEMA_NAME}) establecida")
     except Exception as error:
         print("Error en la apertura de base de datos: \n\t{}".format(error))
         sys.exit()
 
     # Lectura del número de registros a procesar para proceder por trozos
-    consulta_sql = f"SELECT COUNT(*) FROM {schema_name}.inversores_raw WHERE procesado = false;"
+    consulta_sql = f"SELECT COUNT(*) FROM {SCHEMA_NAME}.inversores_raw WHERE procesado = false;"
     count = pd.read_sql_query(consulta_sql, engine).values[0][0]
     if count == 0:
-        print(f"No se han encontrado nuevos registros para procesar en {schema_name}.inversores_raw")
+        print(f"No se han encontrado nuevos registros para procesar en {SCHEMA_NAME}.inversores_raw")
         sys.exit()
 
-    chunk_size = 5000000
-    for i in tqdm(range(0, count, chunk_size), total = math.ceil(count/chunk_size)):
+    CHUNK_SIZE = 5000000
+    for i in tqdm(range(0, count, CHUNK_SIZE), total = math.ceil(count/CHUNK_SIZE)):
         # Lectura de los datos de meteo sin procesar limitados por el chunk_size
-        consulta_sql = f"SELECT * FROM {schema_name}.inversores_raw WHERE procesado = false ORDER BY id LIMIT {chunk_size};"
+        consulta_sql = f"""SELECT * 
+                            FROM {SCHEMA_NAME}.inversores_raw 
+                            WHERE procesado = false 
+                            ORDER BY id LIMIT {CHUNK_SIZE};"""
         inv_df = pd.read_sql_query(consulta_sql, engine)
         inv_df = inv_df.drop(columns = ["procesado", "datetime_procesado"])
             
@@ -58,19 +63,23 @@ if __name__ == "__main__":
         for pair in inv_df[["parque_id", "dispositivo_id"]].drop_duplicates().values:
             id_par = int(pair[0])
             id_inv = int(pair[1])
-            cur.execute(f"""SELECT * FROM {schema_name}.dispositivos WHERE parque_id = {id_par} AND dispositivo_id = {id_inv};""")
+            cur.execute(f"""SELECT * 
+                            FROM {SCHEMA_NAME}.dispositivos 
+                            WHERE parque_id = {id_par} 
+                                AND dispositivo_id = {id_inv};""")
             resultados = cur.fetchall()
             if not resultados:
                 print("Generando entradas de nuevos dispositivos")
                 dispositivo = inv_df[(inv_df["parque_id"] == id_par) & 
                                     (inv_df["dispositivo_id"] == id_inv)][["parque_id", 
-                                                                            "dispositivo_id", 
-                                                                            "nombre_dispositivo", 
-                                                                            "ref", 
-                                                                            "ubicacion", 
-                                                                            "descripcion_dispositivo"]].drop_duplicates()
+                                                                        "dispositivo_id", 
+                                                                        "nombre_dispositivo", 
+                                                                        "ref", 
+                                                                        "ubicacion", 
+                                                                        "descripcion_dispositivo"]]\
+                                                                            .drop_duplicates()
                 print(dispositivo)
-                cur.execute(f"""INSERT INTO {schema_name}.dispositivos
+                cur.execute(f"""INSERT INTO {SCHEMA_NAME}.dispositivos
                             VALUES(%s, %s, %s, %s, %s, %s);""", 
                             tuple(attr for attr in dispositivo.values[0]))
             conn.commit()
@@ -96,10 +105,6 @@ if __name__ == "__main__":
         amp_df = amp_df.dropna()
         amp_df["entrada_id"] = amp_df["entrada_id"].apply(lambda x: x[9:])
         amp_df = amp_df.reset_index(drop = True)
-
-        # # Reajuste de escala de potencia_act. De kW a W -----> Se ha decidido no realizar este reajuste para ajustar a SMALLINT
-        # inv_df["potencia_act"] = inv_df["potencia_act"] * 1000
-        # inv_df["potencia_rea"] = inv_df["potencia_rea"] * 1000
 
         # Escritura de los datos en la base de datos
         try:
@@ -129,9 +134,15 @@ if __name__ == "__main__":
                 'energia_dia': sqlalchemy.types.INTEGER()}
             keys_inv = list(dtypes_inv.keys())
             inv_df = inv_df.drop(columns=[col for col in inv_df.columns if col not in keys_inv])
-            inv_df.to_sql('inversores', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes_inv, chunksize = 100000)
+            inv_df.to_sql('inversores', 
+                          engine, 
+                          if_exists = 'append', 
+                          index = False, 
+                          schema = SCHEMA_NAME, 
+                          dtype = dtypes_inv, 
+                          chunksize = 100000)
         except Exception as error:
-            print("Error en la escritura de datos en la tabla inversores: \n\t{}".format(error))
+            print(f"Error en la escritura de datos en la tabla inversores: \n\t{error}")
             sys.exit()
         
         try:
@@ -141,19 +152,26 @@ if __name__ == "__main__":
                 'amp_dc': sqlalchemy.types.Float(precision=3, asdecimal=True)}
             keys_amp = list(dtypes_amp.keys())
             amp_df = amp_df.drop(columns=[col for col in amp_df.columns if col not in keys_amp])
-            amp_df.to_sql('inversores_detalle', engine, if_exists='append', index = False, schema = schema_name, dtype=dtypes_amp, chunksize = 100000)
+            amp_df.to_sql('inversores_detalle', 
+                          engine, 
+                          if_exists = 'append', 
+                          index = False, 
+                          schema = SCHEMA_NAME, 
+                          dtype = dtypes_amp, chunksize = 100000)
         except Exception as error:
-            print("Error en la escritura de datos en la tabla inversores_detalle: \n\t{}".format(error))
+            print(f"Error en la escritura de datos en la tabla inversores_detalle: \n\t{error}")
             sys.exit()
 
-        # Actualización de la tabla inversores_raw para indicar que los registros han sido procesados y la fecha de procesado
-        # Se actualiza por trozos para evitar bloqueos de la tabla pasando un array de las ids a actualizar
+        # Actualización de la tabla inversores_raw para indicar que los registros han sido 
+            # procesados y la fecha de procesado
+        # Se actualiza por trozos para evitar bloqueos de la tabla pasando un array de las ids a 
+            # actualizar
         ids = inv_df["id"].tolist()
-        chunk_size_update = 100000
-        id_chunks = [tuple(ids[i:i + chunk_size]) for i in range(0, len(ids), chunk_size_update)]
+        CHUNK_SIZE_UPDATE = 100000
+        id_chunks = [tuple(ids[i:i + CHUNK_SIZE]) for i in range(0, len(ids), CHUNK_SIZE_UPDATE)]
         for id_chunk in id_chunks:
             try:
-                cur.execute(f"""UPDATE {schema_name}.inversores_raw
+                cur.execute(f"""UPDATE {SCHEMA_NAME}.inversores_raw
                             SET procesado = true,
                                 datetime_procesado = NOW()
                             WHERE id IN %s""",

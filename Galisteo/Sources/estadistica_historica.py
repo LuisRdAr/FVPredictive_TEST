@@ -87,13 +87,13 @@ for month in months:
         met AS (
             SELECT 
                 datetime_utc,
-                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rad_poa) AS rad_poa,
-                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY LEAST(cloud_impact, 100)/100) AS cloud_impact,
-                BOOL_OR(daylight) AS daylight
+                dispositivo_id,
+                rad_poa,
+                cloud_impact/100 AS cloud_impact
             FROM {SCHEMA_NAME}.meteo
             WHERE daylight = true
                 AND status_srl = 0
-            GROUP BY datetime_utc
+                AND EXTRACT(MONTH FROM datetime_utc) = {month}
         )
         SELECT 
             inv.dispositivo_id,
@@ -104,13 +104,17 @@ for month in months:
             potencia_act,
             rad_poa,
             cloud_impact,
-            consigna_pot_act_planta/MAX(consigna_pot_act_planta) OVER (PARTITION BY inv.dispositivo_id) AS consigna_pot_act_planta
+            consigna_pot_act_planta/MAX(consigna_pot_act_planta) 
+                OVER (PARTITION BY inv.dispositivo_id) AS consigna_pot_act_planta
         FROM inv
         JOIN {SCHEMA_NAME}.distrib_inversores dist
             ON dist.dispositivo_id = inv.dispositivo_id
                 AND dist.entrada_id = inv.entrada_id
+        JOIN {SCHEMA_NAME}.dispositivos AS disp
+            ON disp.dispositivo_id = inv.dispositivo_id
         JOIN met
             ON met.datetime_utc = inv.datetime_utc
+                AND met.dispositivo_id = disp.meteo_cercana_id
         JOIN {SCHEMA_NAME}.ree AS ree
             ON ree.datetime_utc = inv.datetime_utc
         ORDER BY 3, 1, 2;"""
